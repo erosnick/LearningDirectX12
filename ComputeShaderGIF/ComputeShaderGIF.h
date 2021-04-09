@@ -3,6 +3,7 @@
 #include "d3dApp.h"
 #include "Common/MathHelper.h"
 #include "Common/UploadBuffer.h"
+#include "Common/WICUtils.h"
 
 #include <windef.h>
 
@@ -13,11 +14,11 @@
 
 using namespace DirectX;
 
-class shapesApp : public d3dApp {
+class ComputeShaderGIF : public d3dApp {
 public:
 
-    shapesApp(HINSTANCE hInstance, const uint32_t inWindowWidth, const uint32_t inWindowHeight);
-    ~shapesApp();
+    ComputeShaderGIF(HINSTANCE hInstance, const uint32_t inWindowWidth, const uint32_t inWindowHeight);
+    ~ComputeShaderGIF();
 
     virtual LRESULT msgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) override;
 
@@ -28,6 +29,7 @@ protected:
 	virtual void onResize() override; 
 	virtual void update(float delta)  override;
     virtual void draw(float delta)  override;
+    virtual void render(float delta)  override;
 
 	// Convenience overrides for handling mouse input.
 	virtual void onMouseDown(WPARAM btnState, int32_t x, int32_t y) override;
@@ -37,12 +39,14 @@ protected:
     virtual void onKeyDown(WPARAM btnState) override;
     virtual void onKeyUp(WPARAM btnState) override;
 
+    virtual void createCommandObjects() override;
     void createCBVSRVDescriptorHeaps();
     void createFrameResources();
     void createConstantBufferViews();
     void createShaderResourceView();
     void createSampler();
-    void createRootSignature();
+    void createGraphicsRootSignature();
+    void createComputeRootSignature();
     void createShadersAndInputLayout();
     void createBoxGeometry();
     void createPipelineStateOjbect();
@@ -58,6 +62,7 @@ protected:
     void resetCommandList();
     void executeCommandList();
 
+    void prepareComputeResourceSync();
     void prepareFrameResourceSync();
     void frameResourceSync();
 
@@ -65,16 +70,32 @@ protected:
 	void buildImGuiWidgets();
 	void updateImGui();
 	void renderImGui();
+    void compute();
     void drawRenderItems(const std::vector<FrameUtil::RenderItem*>& renderItems);
 
 private:
 
-    ComPtr<ID3D12RootSignature> rootSignature = nullptr;
-    ComPtr<ID3D12DescriptorHeap> CBVDescriptorHeap = nullptr;
+    ComPtr<ID3D12RootSignature> graphicsRootSignature = nullptr;
+    ComPtr<ID3D12DescriptorHeap> graphicsCBVDescriptorHeap = nullptr;
+    ComPtr<ID3D12DescriptorHeap> computeCBVDescriptorHeap = nullptr;
     ComPtr<ID3D12DescriptorHeap> SRVDescriptorHeap = nullptr;
     ComPtr<ID3D12DescriptorHeap> samplerDescriptorHeap = nullptr;
+
+    // 计算着色器相关对象
+    ComPtr<ID3D12RootSignature> computeRootSignature = nullptr;
+    ComPtr<ID3D12CommandQueue> computeCommandQueue = nullptr;
+    ComPtr<ID3D12GraphicsCommandList> computeCommandList = nullptr;
+    ComPtr<ID3D12CommandAllocator> computeCommandAllocator = nullptr;
     
     std::unique_ptr<MeshGeometry> boxGeometry = nullptr;
+
+    GIF gif = {};
+
+    uint64_t gifPlayDelay = 0;
+
+    bool bReDrawFrame = false;
+
+    ComPtr<IWICImagingFactory> factory;
 
     // ComPtr<ID3DBlob> vertexShaderByteCode = nullptr;
     // ComPtr<ID3DBlob> pixelShaderByteCode = nullptr;
@@ -82,9 +103,16 @@ private:
     ComPtr<IDxcBlob> vertexShaderByteCode = nullptr;
     ComPtr<IDxcBlob> pixelShaderByteCode = nullptr;
 
-    ComPtr<ID3D12Resource> texture;
+    ComPtr<ID3D12Resource> gifTexture;
+    ComPtr<ID3D12Resource> RWTexture;
+    ComPtr<ID3D12Resource> gifFrameParamConstantBuffer;
+
     std::vector<ComPtr<ID3D12Resource>> textures;
     ComPtr<ID3D12Resource> textureUpload;
+
+    GIFFrameParam* gifFrameParam;
+
+    GIFFrame gifFrame = {};
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputLayout;
 
@@ -102,8 +130,7 @@ private:
     std::vector<FrameUtil::RenderItem*> transparentRenderItems;
 
     std::unordered_map<std::string, std::unique_ptr<MeshGeometry>> geometries;
-    std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> graphicsPSOs;
-    ComPtr<ID3D12PipelineState> computePSO;
+    std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> PSOs;
 
     int32_t objectCount = 1;
 

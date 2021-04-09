@@ -256,7 +256,15 @@ struct GIFFrame {
 	uint32_t					  size[2];
 };
 
-bool LoadGIF(wchar_t* fileName, IWICImagingFactory* factory, GIF& gif, const WICColor& defaultBackgroundColor = 0u) {
+struct GIFFrameParam {
+	XMFLOAT4 backgroundColor;
+	uint32_t leftTop[2];
+	uint32_t size[2];
+	uint32_t currentFrame;
+	uint32_t disposal;
+};
+
+bool loadGIF(wchar_t* fileName, IWICImagingFactory* factory, GIF& gif, const WICColor& defaultBackgroundColor = 0u) {
 	PROPVARIANT propValue = {};
 	unsigned char backgroundColorIndex = 0;
 	WICColor paletteColors[256] = {};
@@ -372,7 +380,7 @@ bool LoadGIF(wchar_t* fileName, IWICImagingFactory* factory, GIF& gif, const WIC
 	return true;
 }
 
-bool LoadGIFFrame(IWICImagingFactory* factory, GIF& gif, GIFFrame& gifFrame) {
+static bool loadGIFFrame(IWICImagingFactory* factory, GIF& gif, GIFFrame& gifFrame) {
 	WICPixelFormatGUID  guidRawFormat = {};
 	WICPixelFormatGUID	guidTargetFormat = {};
 	ComPtr<IWICFormatConverter>			converter;
@@ -394,7 +402,7 @@ bool LoadGIFFrame(IWICImagingFactory* factory, GIF& gif, GIFFrame& gifFrame) {
 		guidTargetFormat = GetConvertToWICFormat(guidRawFormat);
 
 		if (guidTargetFormat == GUID_WICPixelFormatDontCare) {
-			ThrowIfFailed(S_FALSE);
+			ThrowIfFailed(E_FAIL);
 		}
 
 		gifFrame.textureFormat = GetDXGIFormatFromWICFormat(guidTargetFormat);
@@ -416,7 +424,7 @@ bool LoadGIFFrame(IWICImagingFactory* factory, GIF& gif, GIFFrame& gifFrame) {
 		ThrowIfFailed(gifFrame.frame.As(&gifFrame.bmp));
 	}
 
-	ThrowIfFailed(gifFrame.frame->GetMetadataQueryReader(&metadata));
+	ThrowIfFailed(gifFrame.frame->GetMetadataQueryReader(metadata.GetAddressOf()));
 
 	PROPVARIANT propValue;
 
@@ -467,7 +475,7 @@ bool LoadGIFFrame(IWICImagingFactory* factory, GIF& gif, GIFFrame& gifFrame) {
 
 	PropVariantClear(&propValue);
 
-	if (SUCCEEDED(metadata->GetMetadataByName(L"/imgdesc/Disposal", &propValue))) {
+	if (SUCCEEDED(metadata->GetMetadataByName(L"/grctlext/Disposal", &propValue))) {
 		if (VT_UI1 == propValue.vt) {
 			gifFrame.disposal = propValue.uiVal;
 		}
@@ -479,7 +487,7 @@ bool LoadGIFFrame(IWICImagingFactory* factory, GIF& gif, GIFFrame& gifFrame) {
 	return true;
 }
 
-static bool UploadGIFFrame(ID3D12Device4* device, ID3D12GraphicsCommandList* commandList, IWICImagingFactory* factory, GIFFrame& gifFrame, ID3D12Resource** gifFrameResource, ID3D12Resource** gifFrameUpload) {
+static bool uploadGIFFrame(ID3D12Device4* device, ID3D12GraphicsCommandList* commandList, IWICImagingFactory* factory, GIFFrame& gifFrame, ID3D12Resource** gifFrameResource, ID3D12Resource** gifFrameUpload) {
 	uint32_t textureWidth = 0;
 	uint32_t textureHeight = 0;
 	uint32_t bpp = 0;
@@ -490,7 +498,7 @@ static bool UploadGIFFrame(ID3D12Device4* device, ID3D12GraphicsCommandList* com
 
 	// 从属性解析出的帧画面大小与转换后的画面大小不一致
 	if (textureWidth != gifFrame.size[0] || textureHeight != gifFrame.size[1]) {
-		ThrowIfFailed(S_FALSE);
+		ThrowIfFailed(E_FAIL);
 	}
 
 	// 获取图片像素的位大小BPP(Bits Per Pixel)信息，用以计算图片行数据的真实大小(单位：字节)
@@ -504,10 +512,13 @@ static bool UploadGIFFrame(ID3D12Device4* device, ID3D12GraphicsCommandList* com
 	ThrowIfFailed(componentInfo->GetComponentType(&type));
 
 	if (type != WICPixelFormat) {
-		ThrowIfFailed(S_FALSE);
+		ThrowIfFailed(E_FAIL);
 	}
 
 	ComPtr<IWICPixelFormatInfo> pixelInfo;
+	ThrowIfFailed(componentInfo.As(&pixelInfo));
+
+	ThrowIfFailed(pixelInfo->GetBitsPerPixel(&bpp));
 
 	uint32_t textureRowPitch = (textureWidth * bpp + 7) / 8;
 
@@ -581,6 +592,12 @@ static bool UploadGIFFrame(ID3D12Device4* device, ID3D12GraphicsCommandList* com
 		ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
 	}
 
+	// 从图片中读取数据
+	ThrowIfFailed(gifFrame.bmp->CopyPixels(nullptr,
+		textureRowPitch,
+		static_cast<uint32_t>(textureRowPitch * textureHeight),		//注意这里才是图片数据真实的大小，这个值通常小于缓冲的大小
+		reinterpret_cast<byte*>(gifFrameData)));
+
 	//--------------------------------------------------------------------------------------------------------------
 	// 第一个Copy命令，从内存复制到上传堆（共享内存）中
 	//因为上传堆实际就是CPU传递数据到GPU的中介
@@ -644,7 +661,7 @@ static  std::vector<ComPtr<IWICBitmapSource>> WICLoadImage(const std::wstring& f
 
 	std::vector<ComPtr<IWICBitmapSource>> bmps;
 
-	ThrowIfFailed(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)));
+	ThrowIfFailed(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf())));
 
     ThrowIfFailed(factory->CreateDecoderFromFilename(
         fileName.c_str(),                // 文件名
@@ -680,7 +697,7 @@ static  std::vector<ComPtr<IWICBitmapSource>> WICLoadImage(const std::wstring& f
 			WICPixelFormatGUID convertToPixelFormat = GetConvertToWICFormat(pixelFormat);
 
 			if (convertToPixelFormat == GUID_WICPixelFormatDontCare) {
-				ThrowIfFailed(S_FALSE);
+				ThrowIfFailed(E_FAIL);
 			}
 
 			textureFormat = GetDXGIFormatFromWICFormat(convertToPixelFormat);
@@ -751,7 +768,7 @@ static  std::vector<ComPtr<IWICBitmapSource>> WICLoadImage(const std::wstring& f
 		// ThrowIfFailed(info->GetComponentType(&type));
 
 		// if (type != WICPixelFormat) {
-		// 	ThrowIfFailed(S_FALSE);
+		// 	ThrowIfFailed(E_FAIL);
 		// }
 
 		// ComPtr<IWICPixelFormatInfo> pixelInfo;

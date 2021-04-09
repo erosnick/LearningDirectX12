@@ -1,6 +1,5 @@
-﻿#include "ShapesApp.h"
+﻿#include "ComputeShaderGIF.h"
 #include "Common/d3dUtil.h"
-#include "Common/WICUtils.h"
 #include "Common/GeometryGenerator.h"
 #include <DirectXColors.h>
 
@@ -9,12 +8,12 @@
 
 #include <iostream>
 
-shapesApp::shapesApp(HINSTANCE inInstance, const uint32_t inWindowWidth, const uint32_t inWindowHeight)
+ComputeShaderGIF::ComputeShaderGIF(HINSTANCE inInstance, const uint32_t inWindowWidth, const uint32_t inWindowHeight)
 : d3dApp(inInstance, inWindowWidth, inWindowHeight) {
 
 }
 
-shapesApp::~shapesApp() {
+ComputeShaderGIF::~ComputeShaderGIF() {
     frameResourceSync();
 
 	ImGui_ImplDX12_Shutdown();
@@ -25,7 +24,7 @@ shapesApp::~shapesApp() {
 // Forward declare message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-LRESULT shapesApp::msgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+LRESULT ComputeShaderGIF::msgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
 	{
 		return true;
@@ -39,7 +38,7 @@ LRESULT shapesApp::msgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	return d3dApp::msgProc(hwnd, msg, wParam, lParam);
 }
 
-bool shapesApp::initialize() {
+bool ComputeShaderGIF::initialize() {
     if(!d3dApp::initialize()) {
         return false;
     }
@@ -49,16 +48,17 @@ bool shapesApp::initialize() {
     createBoxGeometry();
     buildShapeGeometry();
     buildRenderItems();
+    createCBVSRVDescriptorHeaps();
     loadResources();
 
     executeCommandList();
 
-    createCBVSRVDescriptorHeaps();
     createFrameResources();
     createConstantBufferViews();
     createShaderResourceView();
     createSampler();
-    createRootSignature();
+    createGraphicsRootSignature();
+    createComputeRootSignature();
     createShadersAndInputLayout();
     createPipelineStateOjbect();
 
@@ -67,7 +67,7 @@ bool shapesApp::initialize() {
 	return true;
 }
 
-void shapesApp::onResize() {
+void ComputeShaderGIF::onResize() {
     d3dApp::onResize();
 
 	ImGui_ImplDX12_InvalidateDeviceObjects();
@@ -90,7 +90,7 @@ void shapesApp::onResize() {
     XMStoreFloat4x4(&projection, newProjection);
 }
 
-void shapesApp::update(float delta) {
+void ComputeShaderGIF::update(float delta) {
     frameResourceSync();
 
     updateObjectConstantBuffers();
@@ -100,7 +100,7 @@ void shapesApp::update(float delta) {
 	buildImGuiWidgets();
 }
 
-void shapesApp::draw(float delta) {
+void ComputeShaderGIF::draw(float delta) {
     // 重复使用记录命令的相关内存
     // 只有当与GPU关联的命令列表执行完成时，我们才能将其重置
     commandAllocator = currentFrameResource->commandAllocator;
@@ -109,40 +109,40 @@ void shapesApp::draw(float delta) {
     // 在通过ExecuteCommandList方法将某个命令列表加入命令队列后，
     // 我们便可以重置该命令列表。以此来复用命令列表及其内存
     if (isWireframe) {
-        ThrowIfFailed(commandList->Reset(
-            commandAllocator.Get(), graphicsPSOs["opaque_wireframe"].Get()));
+        ThrowIfFailed(graphicsCommandList->Reset(
+            commandAllocator.Get(), PSOs["opaque_wireframe"].Get()));
     }
     else {
-        ThrowIfFailed(commandList->Reset(commandAllocator.Get(), graphicsPSOs["opaque"].Get()));
+        ThrowIfFailed(graphicsCommandList->Reset(commandAllocator.Get(), PSOs["opaque"].Get()));
     }
 
     // 对资源的状态进行转换，将资源从呈现状态转换为渲染目标状态
-    commandList->ResourceBarrier(
+    graphicsCommandList->ResourceBarrier(
         1, &CD3DX12_RESOURCE_BARRIER::Transition(
         currentBackBuffer(),
         D3D12_RESOURCE_STATE_PRESENT,
         D3D12_RESOURCE_STATE_RENDER_TARGET));
 
     // 设置视口和裁剪矩形。它们需要随着命令列表的重置而重置
-    commandList->RSSetViewports(1, &viewport);
-    commandList->RSSetScissorRects(1, &scissorRect);
+    graphicsCommandList->RSSetViewports(1, &viewport);
+    graphicsCommandList->RSSetScissorRects(1, &scissorRect);
 
     // 清除后台缓冲区和深度缓冲区
-    commandList->ClearRenderTargetView(currentBackBufferView(), DirectX::Colors::LightSteelBlue, 0, nullptr);
-    commandList->ClearDepthStencilView(depthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+    graphicsCommandList->ClearRenderTargetView(currentBackBufferView(), DirectX::Colors::LightSteelBlue, 0, nullptr);
+    graphicsCommandList->ClearDepthStencilView(depthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
 
     // 指定要渲染的缓冲区
-    commandList->OMSetRenderTargets(1, &currentBackBufferView(), true, &depthStencilView());
+    graphicsCommandList->OMSetRenderTargets(1, &currentBackBufferView(), true, &depthStencilView());
 
-    ID3D12DescriptorHeap* descriptorHeaps[] = {CBVDescriptorHeap.Get(), samplerDescriptorHeap.Get()};
+    ID3D12DescriptorHeap* descriptorHeaps[] = {graphicsCBVDescriptorHeap.Get(), samplerDescriptorHeap.Get()};
 
-    commandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+    graphicsCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
-    commandList->SetGraphicsRootSignature(rootSignature.Get());
+    graphicsCommandList->SetGraphicsRootSignature(graphicsRootSignature.Get());
 
-    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    commandList->IASetVertexBuffers(0, 1, &boxGeometry->VertexBufferView());
-    commandList->IASetIndexBuffer(&boxGeometry->IndexBufferView());
+    graphicsCommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    graphicsCommandList->IASetVertexBuffers(0, 1, &boxGeometry->VertexBufferView());
+    graphicsCommandList->IASetIndexBuffer(&boxGeometry->IndexBufferView());
 
     uint32_t passConstantBufferIndex = frameResourcesCount * objectCount + currentFrameIndex;
 
@@ -150,26 +150,26 @@ void shapesApp::draw(float delta) {
 
     drawRenderItems(opaqueRenderItems);
 
-    CD3DX12_GPU_DESCRIPTOR_HANDLE SRVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), SRVDescriptorIndex, CBVSRVUAVDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE SRVDescriptorHandle(graphicsCBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), SRVDescriptorIndex, CBVSRVUAVDescriptorSize);
 
-    commandList->SetDescriptorHeaps(1, SRVDescriptorHeap.GetAddressOf());
-    commandList->SetGraphicsRootDescriptorTable(4, SRVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    graphicsCommandList->SetDescriptorHeaps(1, SRVDescriptorHeap.GetAddressOf());
+    graphicsCommandList->SetGraphicsRootDescriptorTable(4, SRVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
     renderImGui();
 
     // 再次将资源状态进行转换，将资源从渲染目标状态转换回呈现状态
-    commandList->ResourceBarrier(
+    graphicsCommandList->ResourceBarrier(
     1, &CD3DX12_RESOURCE_BARRIER::Transition(
         currentBackBuffer(),
         D3D12_RESOURCE_STATE_RENDER_TARGET,
         D3D12_RESOURCE_STATE_PRESENT));
 
     // 完成命令的记录
-    ThrowIfFailed(commandList->Close());
+    ThrowIfFailed(graphicsCommandList->Close());
 
     // 将待执行的命令队列加入命令列表
-    ID3D12CommandList* commandLists[] = {commandList.Get()};
-    commandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
+    ID3D12CommandList* commandLists[] = {graphicsCommandList.Get()};
+    graphicsCommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
 
     // 交换后台缓冲区和前台缓冲区
     ThrowIfFailed(swapChain->Present(0, 0));
@@ -179,19 +179,24 @@ void shapesApp::draw(float delta) {
     prepareFrameResourceSync();
 }
 
+void ComputeShaderGIF::render(float delta) {
+    compute();
+    draw(delta);
+}
+
 // Convenience overrides for handling mouse input.
-void shapesApp::onMouseDown(WPARAM btnState, int32_t x, int32_t y) {
+void ComputeShaderGIF::onMouseDown(WPARAM btnState, int32_t x, int32_t y) {
     lastMousePosition.x = x;
     lastMousePosition.y = y;
 
     SetCapture(mainWindow);
 }
 
-void shapesApp::onMouseUp(WPARAM btnState, int32_t x, int32_t y) {
+void ComputeShaderGIF::onMouseUp(WPARAM btnState, int32_t x, int32_t y) {
     ReleaseCapture();
 }
 
-void shapesApp::onMouseMove(WPARAM btnState, int32_t x, int32_t y) {
+void ComputeShaderGIF::onMouseMove(WPARAM btnState, int32_t x, int32_t y) {
     if ((btnState & MK_LBUTTON) != 0) {
         // 根据鼠标的移动距离计算旋转角度，并令每个像素都按此
         // 角度的1 / 4 旋转
@@ -221,25 +226,46 @@ void shapesApp::onMouseMove(WPARAM btnState, int32_t x, int32_t y) {
     lastMousePosition.y = y;
 }
 
-void shapesApp::onKeyDown(WPARAM btnState) {
+void ComputeShaderGIF::onKeyDown(WPARAM btnState) {
     if (btnState == VK_F2) {
         isWireframe = !isWireframe;
     }
 }
 
-void shapesApp::onKeyUp(WPARAM btnState) {
+void ComputeShaderGIF::onKeyUp(WPARAM btnState) {
 
 }
 
-void shapesApp::createCBVSRVDescriptorHeaps() {
-    D3D12_DESCRIPTOR_HEAP_DESC CBVDescriptorHeapDesc;
+void ComputeShaderGIF::createCommandObjects() {
+    d3dApp::createCommandObjects();
+
+    D3D12_COMMAND_QUEUE_DESC computeCommandQueueDesc = {};
+
+    D3D12_COMMAND_LIST_TYPE computeCommandListType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+
+    computeCommandQueueDesc.Type = computeCommandListType;
+    computeCommandQueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+
+    ThrowIfFailed(device->CreateCommandQueue(&computeCommandQueueDesc, IID_PPV_ARGS(computeCommandQueue.GetAddressOf())));
+
+    ThrowIfFailed(device->CreateCommandAllocator(computeCommandListType, IID_PPV_ARGS(computeCommandAllocator.GetAddressOf())));
+
+    ThrowIfFailed(device->CreateCommandList(0, computeCommandListType, computeCommandAllocator.Get(), nullptr, IID_PPV_ARGS(computeCommandList.GetAddressOf())));
+
+    ThrowIfFailed(computeCommandList->Close());
+}
+
+void ComputeShaderGIF::createCBVSRVDescriptorHeaps() {
+    textures.resize(1);
+
+    D3D12_DESCRIPTOR_HEAP_DESC graphicsCBVDescriptorHeapDesc;
     // objectCount * frameBackBufferCount + CRV(1) + SRV(1)
     objectCount = static_cast<uint32_t>(allRenderItems.size());
-    CBVDescriptorHeapDesc.NumDescriptors = (objectCount + 1 + 1) * frameBackBufferCount + static_cast<uint32_t>(textures.size());
-    CBVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    CBVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    CBVDescriptorHeapDesc.NodeMask = 0;
-    ThrowIfFailed(device->CreateDescriptorHeap(&CBVDescriptorHeapDesc, IID_PPV_ARGS(CBVDescriptorHeap.GetAddressOf())));
+    graphicsCBVDescriptorHeapDesc.NumDescriptors = (objectCount + 1 + 1) * frameBackBufferCount + static_cast<uint32_t>(textures.size());
+    graphicsCBVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    graphicsCBVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    graphicsCBVDescriptorHeapDesc.NodeMask = 0;
+    ThrowIfFailed(device->CreateDescriptorHeap(&graphicsCBVDescriptorHeapDesc, IID_PPV_ARGS(graphicsCBVDescriptorHeap.GetAddressOf())));
 
     D3D12_DESCRIPTOR_HEAP_DESC SRVDescriptorHeapDesc;
     SRVDescriptorHeapDesc.NumDescriptors = 1;
@@ -254,15 +280,23 @@ void shapesApp::createCBVSRVDescriptorHeaps() {
     samplerDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     samplerDescriptorHeapDesc.NodeMask = 0;
     ThrowIfFailed(device->CreateDescriptorHeap(&samplerDescriptorHeapDesc, IID_PPV_ARGS(samplerDescriptorHeap.GetAddressOf())));
+
+    // 创建Compute Shader需要的描述符堆
+    D3D12_DESCRIPTOR_HEAP_DESC computeCBVDescriptorHeapDesc;
+    computeCBVDescriptorHeapDesc.NumDescriptors = 3;
+    computeCBVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    computeCBVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    computeCBVDescriptorHeapDesc.NodeMask = 0;
+    ThrowIfFailed(device->CreateDescriptorHeap(&computeCBVDescriptorHeapDesc, IID_PPV_ARGS(computeCBVDescriptorHeap.GetAddressOf())));
 }
 
-void shapesApp::createFrameResources() {
+void ComputeShaderGIF::createFrameResources() {
     for (int frameResourceIndex = 0; frameResourceIndex < frameBackBufferCount; frameResourceIndex++) {
         frameResources.push_back(std::make_unique<FrameUtil::FrameResources>(device.Get(), objectCount, 1, 1));
     }
 }
 
-void shapesApp::createConstantBufferViews() {
+void ComputeShaderGIF::createConstantBufferViews() {
 
     UINT objectConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::ObjectConstants));
 
@@ -278,17 +312,17 @@ void shapesApp::createConstantBufferViews() {
             // 偏移到常量缓冲区中第i个物体所对应的常量数据
             objectConstantBufferAddress += objectIndex * objectConstantBufferSize;
 
-            CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+            CD3DX12_CPU_DESCRIPTOR_HANDLE CBVCPUDescriptorHandle(graphicsCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
             int32_t descriptorHeapIndex = static_cast<uint32_t>(frameResourcesIndex) * objectCount + static_cast<uint32_t>(objectIndex);
 
-            CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
+            CBVCPUDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
             D3D12_CONSTANT_BUFFER_VIEW_DESC constantBufferViewDesc;
             constantBufferViewDesc.BufferLocation = objectConstantBufferAddress;
             constantBufferViewDesc.SizeInBytes = objectConstantBufferSize;
 
-            device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
+            device->CreateConstantBufferView(&constantBufferViewDesc, CBVCPUDescriptorHandle);
         }
     }
 
@@ -299,17 +333,17 @@ void shapesApp::createConstantBufferViews() {
 
         D3D12_GPU_VIRTUAL_ADDRESS passConstantBufferAddress = passConstantBuffer->Resource()->GetGPUVirtualAddress();
 
-        CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+        CD3DX12_CPU_DESCRIPTOR_HANDLE CBVCPUDescriptorHandle(graphicsCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
         uint32_t descriptorHeapIndex = frameResourcesCount * objectCount + frameResourcesIndex;
 
-        CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
+        CBVCPUDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
         D3D12_CONSTANT_BUFFER_VIEW_DESC constantBufferViewDesc;
         constantBufferViewDesc.BufferLocation = passConstantBufferAddress;
         constantBufferViewDesc.SizeInBytes = passConstantBufferSize;
 
-        device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
+        device->CreateConstantBufferView(&constantBufferViewDesc, CBVCPUDescriptorHandle);
     }
 
     uint32_t materialConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::MaterialConstants));
@@ -319,43 +353,86 @@ void shapesApp::createConstantBufferViews() {
 
         D3D12_GPU_VIRTUAL_ADDRESS materialConstantBufferAddress = materialConstantBuffer->Resource()->GetGPUVirtualAddress();
 
-        CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+        CD3DX12_CPU_DESCRIPTOR_HANDLE CBVCPUDescriptorHandle(graphicsCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
         uint32_t descriptorHeapIndex = frameResourcesCount * (objectCount + 1) + frameResourceIndex;
 
-        CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
+        CBVCPUDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
         D3D12_CONSTANT_BUFFER_VIEW_DESC constantBufferViewDesc;
         constantBufferViewDesc.BufferLocation = materialConstantBufferAddress;
         constantBufferViewDesc.SizeInBytes = materialConstantBufferSize;
 
-        device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
+        device->CreateConstantBufferView(&constantBufferViewDesc, CBVCPUDescriptorHandle);
     }
+
+    uint32_t gifFrameParamConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(GIFFrameParam));
+
+    D3D12_HEAP_PROPERTIES heapProperties = {D3D12_HEAP_TYPE_UPLOAD};
+
+    D3D12_RESOURCE_DESC resourceDesc = {};
+
+    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+    resourceDesc.Width = gifFrameParamConstantBufferSize;
+    resourceDesc.Height = 1;
+    resourceDesc.MipLevels = 1;
+    resourceDesc.DepthOrArraySize = 1;
+    resourceDesc.SampleDesc.Count = 1;
+    resourceDesc.SampleDesc.Quality = 0;
+
+    ThrowIfFailed(device->CreateCommittedResource(
+        &heapProperties,
+        D3D12_HEAP_FLAG_NONE,
+        &resourceDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(gifFrameParamConstantBuffer.GetAddressOf())));
+
+    ThrowIfFailed(gifFrameParamConstantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&gifFrameParam)));
+
+    // Compute CBV
+    // cbuffer GIFFrameParam : register(b0)
+    D3D12_CONSTANT_BUFFER_VIEW_DESC computeConstantBufferViewDesc = {};
+
+    computeConstantBufferViewDesc.BufferLocation = gifFrameParamConstantBuffer->GetGPUVirtualAddress();
+    computeConstantBufferViewDesc.SizeInBytes = gifFrameParamConstantBufferSize;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE computeCBVCPUDescriptorHandle(computeCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+    device->CreateConstantBufferView(&computeConstantBufferViewDesc, computeCBVCPUDescriptorHandle);
 }
 
-void shapesApp::createShaderResourceView() {
+void ComputeShaderGIF::createShaderResourceView() {
     // 最终创建SRV描述符
     D3D12_SHADER_RESOURCE_VIEW_DESC shaderResourceViewDesc = {};
 
     shaderResourceViewDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    shaderResourceViewDesc.Format = textureFormat;
+    shaderResourceViewDesc.Format = gifFrame.textureFormat;
     shaderResourceViewDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     shaderResourceViewDesc.Texture2D.MipLevels = 1;
 
     uint32_t descriptorHeapIndex = (objectCount + 2) * frameBackBufferCount;
 
-    CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHeapHanle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+    CD3DX12_CPU_DESCRIPTOR_HANDLE graphicsCBVCPUDescriptorHanle(graphicsCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
-    CBVDescriptorHeapHanle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
+    graphicsCBVCPUDescriptorHanle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
-    for (size_t textureIndex = 0; textureIndex < textures.size(); textureIndex++) {
-        device->CreateShaderResourceView(textures[textureIndex].Get(), &shaderResourceViewDesc, CBVDescriptorHeapHanle);
+    // for (size_t textureIndex = 0; textureIndex < textures.size(); textureIndex++) {
+    //     device->CreateShaderResourceView(textures[textureIndex].Get(), &shaderResourceViewDesc, graphicsCBVCPUDescriptorHanle);
 
-        CBVDescriptorHeapHanle.Offset(CBVSRVUAVDescriptorSize);
-    }
+    //     graphicsCBVCPUDescriptorHanle.Offset(CBVSRVUAVDescriptorSize);
+    // }
+
+    // 经由Compute Shader处理过后的GIF纹理传入Pixel Shader进行渲染
+    device->CreateShaderResourceView(RWTexture.Get(), &shaderResourceViewDesc, graphicsCBVCPUDescriptorHanle);
+
+    RWTexture->SetName(L"RWTexture");
 }
 
-void shapesApp::createSampler() {
+void ComputeShaderGIF::createSampler() {
     D3D12_SAMPLER_DESC samplerDesc;
 
     samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -375,7 +452,9 @@ void shapesApp::createSampler() {
     device->CreateSampler(&samplerDesc, samplerDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 }
 
-void shapesApp::createRootSignature() {
+void ComputeShaderGIF::createGraphicsRootSignature() {
+    // 创建渲染管线根签名
+
     // 着色器程序一般需要以资源作为输入(例如常量缓冲区、纹理、采样器等)
     // 根签名则定义了着色器程序所需的具体资源，如果把着色器看作一个函数，
     // 而将输入的资源当作向函数传递的参数数据，那么便可类似第认为根签名
@@ -506,13 +585,76 @@ void shapesApp::createRootSignature() {
     0,
     serializedRootSignature->GetBufferPointer(),
     serializedRootSignature->GetBufferSize(),
-    IID_PPV_ARGS(rootSignature.GetAddressOf())));
+    IID_PPV_ARGS(graphicsRootSignature.GetAddressOf())));
 }
 
-void shapesApp::createShadersAndInputLayout() {
+void ComputeShaderGIF::createComputeRootSignature() {
+    // 创建渲染管线根签名
 
-    vertexShaderByteCode = d3dUtil::compileShader(L"Shaders/color.hlsl", L"VS", L"vs_6_0");
-    pixelShaderByteCode = d3dUtil::compileShader(L"Shaders/color.hlsl", L"PS", L"ps_6_0");
+    D3D12_DESCRIPTOR_RANGE1 ranges[3];
+
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+    ranges[0].NumDescriptors = 1;   // 1 Constant Buffer View + 1 Texture View
+    ranges[0].BaseShaderRegister = 0;
+    ranges[0].RegisterSpace = 0;
+    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    ranges[0].OffsetInDescriptorsFromTableStart = 0;
+
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[1].NumDescriptors = 1;   // 1 Constant Buffer View + 1 Texture View
+    ranges[1].BaseShaderRegister = 0;
+    ranges[1].RegisterSpace = 0;
+    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    ranges[1].OffsetInDescriptorsFromTableStart = 0;
+
+    ranges[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[2].NumDescriptors = 1;   // 1 Constant Buffer View + 1 Texture View
+    ranges[2].BaseShaderRegister = 0;
+    ranges[2].RegisterSpace = 0;
+    ranges[2].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
+    ranges[2].OffsetInDescriptorsFromTableStart = 0;
+
+    D3D12_ROOT_PARAMETER1 rootParameters[3];
+
+    rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rootParameters[0].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[0].DescriptorTable.pDescriptorRanges = &ranges[0];
+
+    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rootParameters[1].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[1].DescriptorTable.pDescriptorRanges = &ranges[1];
+
+    rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rootParameters[2].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[2].DescriptorTable.pDescriptorRanges = &ranges[2];
+
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+
+    rootSignatureDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    rootSignatureDesc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+    rootSignatureDesc.Desc_1_1.NumParameters = _countof(rootParameters);
+    rootSignatureDesc.Desc_1_1.pParameters = rootParameters;
+    rootSignatureDesc.Desc_1_1.NumStaticSamplers = 0;
+    rootSignatureDesc.Desc_1_1.pStaticSamplers = nullptr;
+
+    ComPtr<ID3DBlob> serializedRootSignature = nullptr;
+    ComPtr<ID3DBlob> errorBlob = nullptr;
+
+    ThrowIfFailed(D3D12SerializeVersionedRootSignature(&rootSignatureDesc, &serializedRootSignature, &errorBlob));
+
+    ThrowIfFailed(device->CreateRootSignature(0,
+        serializedRootSignature->GetBufferPointer(),
+        serializedRootSignature->GetBufferSize(),
+        IID_PPV_ARGS(computeRootSignature.GetAddressOf())));
+}
+
+void ComputeShaderGIF::createShadersAndInputLayout() {
+
+    vertexShaderByteCode = d3dUtil::compileShader(L"Shaders/Basic.hlsl", L"VS", L"vs_6_0");
+    pixelShaderByteCode = d3dUtil::compileShader(L"Shaders/Basic.hlsl", L"PS", L"ps_6_0");
     
     inputLayout = 
     {
@@ -522,7 +664,7 @@ void shapesApp::createShadersAndInputLayout() {
     };
 }
 
-void shapesApp::createBoxGeometry() {
+void ComputeShaderGIF::createBoxGeometry() {
     // std::array<Vertex, 24> vertices = 
     // {
     //     // Front face
@@ -612,10 +754,10 @@ void shapesApp::createBoxGeometry() {
         vertices[i].uv = box.Vertices[i].TexC;
     }
 
-    boxGeometry->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(), commandList.Get(),
+    boxGeometry->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(), graphicsCommandList.Get(),
     vertices.data(), vertexBufferByteSize, boxGeometry->VertexBufferUploader);
 
-    boxGeometry->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(), commandList.Get(),
+    boxGeometry->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(), graphicsCommandList.Get(),
     box.Indices32.data(), indexBufferByteSize, boxGeometry->IndexBufferUploader);
 
     boxGeometry->VertexByteStride = sizeof(FrameUtil::Vertex);
@@ -631,27 +773,27 @@ void shapesApp::createBoxGeometry() {
     boxGeometry->DrawArgs["Box"] = submesh;
 }
 
-void shapesApp::createPipelineStateOjbect() {
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineStateObjectDesc;
+void ComputeShaderGIF::createPipelineStateOjbect() {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicsPSODesc;
 
-    ZeroMemory(&pipelineStateObjectDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
+    ZeroMemory(&graphicsPSODesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
 
-    pipelineStateObjectDesc.InputLayout = {inputLayout.data(), (UINT)inputLayout.size()};
-    pipelineStateObjectDesc.pRootSignature = rootSignature.Get();
+    graphicsPSODesc.InputLayout = {inputLayout.data(), (UINT)inputLayout.size()};
+    graphicsPSODesc.pRootSignature = graphicsRootSignature.Get();
 
     std::string vertexShader;
     
     d3dUtil::loadShader("Shaders/vs.bin", vertexShader);
 
-    pipelineStateObjectDesc.VS.pShaderBytecode = vertexShader.data();
-    pipelineStateObjectDesc.VS.BytecodeLength = vertexShader.size();
+    graphicsPSODesc.VS.pShaderBytecode = vertexShader.data();
+    graphicsPSODesc.VS.BytecodeLength = vertexShader.size();
 
     std::string pixelShader;
 
      d3dUtil::loadShader("Shaders/ps.bin", pixelShader);
 
-    pipelineStateObjectDesc.PS.pShaderBytecode = pixelShader.data();
-    pipelineStateObjectDesc.PS.BytecodeLength = pixelShader.size();
+    graphicsPSODesc.PS.pShaderBytecode = pixelShader.data();
+    graphicsPSODesc.PS.BytecodeLength = pixelShader.size();
 
     // pipelineStateObjectDesc.VS = CD3DX12_SHADER_BYTECODE(vertexShaderByteCode.Get());
     // pipelineStateObjectDesc.PS = CD3DX12_SHADER_BYTECODE(pixelShaderByteCode.Get());
@@ -659,16 +801,16 @@ void shapesApp::createPipelineStateOjbect() {
     D3D12_RASTERIZER_DESC rasterizerDesc = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     // rasterizerDesc.FillMode = D3D12_FILL_MODE_WIREFRAME;
 
-    pipelineStateObjectDesc.RasterizerState = rasterizerDesc;
-    pipelineStateObjectDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-    pipelineStateObjectDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-    pipelineStateObjectDesc.SampleMask = UINT_MAX;
-    pipelineStateObjectDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pipelineStateObjectDesc.NumRenderTargets = 1;
-    pipelineStateObjectDesc.RTVFormats[0] = backBufferFormat;
-    pipelineStateObjectDesc.SampleDesc.Count = 1;
-    pipelineStateObjectDesc.SampleDesc.Quality = 0;
-    pipelineStateObjectDesc.DSVFormat = depthStencilBufferFormat;
+    graphicsPSODesc.RasterizerState = rasterizerDesc;
+    graphicsPSODesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    graphicsPSODesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    graphicsPSODesc.SampleMask = UINT_MAX;
+    graphicsPSODesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    graphicsPSODesc.NumRenderTargets = 1;
+    graphicsPSODesc.RTVFormats[0] = backBufferFormat;
+    graphicsPSODesc.SampleDesc.Count = 1;
+    graphicsPSODesc.SampleDesc.Quality = 0;
+    graphicsPSODesc.DSVFormat = depthStencilBufferFormat;
     
     // ComPtr的行为类似于std::shared_ptr，要注意不要不小心覆盖了指针导致内存泄漏
     // 比如如下代码中，如果不声明两个ComPtr<ID3D12PipelineState，只使用一个的话，
@@ -676,200 +818,263 @@ void shapesApp::createPipelineStateOjbect() {
     // ComPtr析构的时候只会删除后面创建的ID3D12PipelineState，从而导致内存泄露
     ComPtr<ID3D12PipelineState> opaquePipelineStateObject = nullptr;
 
-    ThrowIfFailed(device->CreateGraphicsPipelineState(&pipelineStateObjectDesc, IID_PPV_ARGS(opaquePipelineStateObject.GetAddressOf())));
+    ThrowIfFailed(device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(opaquePipelineStateObject.GetAddressOf())));
 
-    graphicsPSOs["opaque"] = opaquePipelineStateObject;
+    PSOs["opaque"] = opaquePipelineStateObject;
 
-    pipelineStateObjectDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    graphicsPSODesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
 
     ComPtr<ID3D12PipelineState> opaqueWireframePipelineStateObject = nullptr;
 
-    ThrowIfFailed(device->CreateGraphicsPipelineState(&pipelineStateObjectDesc, IID_PPV_ARGS(opaqueWireframePipelineStateObject.GetAddressOf())));
+    ThrowIfFailed(device->CreateGraphicsPipelineState(&graphicsPSODesc, IID_PPV_ARGS(opaqueWireframePipelineStateObject.GetAddressOf())));
 
-    graphicsPSOs["opaque_wireframe"] = opaqueWireframePipelineStateObject;
+    PSOs["opaque_wireframe"] = opaqueWireframePipelineStateObject;
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC computePSODesc = {};
+
+    computePSODesc.pRootSignature = computeRootSignature.Get();
+
+    std::string computeShader;
+
+     d3dUtil::loadShader("Shaders/cs.bin", computeShader);
+
+    computePSODesc.CS.pShaderBytecode = computeShader.data();
+    computePSODesc.CS.BytecodeLength = computeShader.size();
+
+    ComPtr<ID3D12PipelineState> computePSO;
+
+    ThrowIfFailed(device->CreateComputePipelineState(&computePSODesc, IID_PPV_ARGS(computePSO.GetAddressOf())));
+
+    PSOs["compute"] = computePSO;
 }
 
-void shapesApp::loadResources() {
-    uint32_t textureWidth = 0;
-    uint32_t textureHeight = 0;
-    uint32_t bpp = 0;
-    uint32_t rowPitch = 0;
+void ComputeShaderGIF::loadResources() {
+    ThrowIfFailed(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf())));
 
-    // auto images = WICLoadImage(L"Textures/Kanna.gif", textureWidth, textureHeight, bpp, rowPitch, textureFormat);
-    auto images = WICLoadImage(L"Textures/Kanna0.gif", textureWidth, textureHeight, bpp, rowPitch, textureFormat);
-
-    D3D12_RESOURCE_DESC textureDesc = {};
-
-    // Alignment must be 64KB (D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) or 0, which is effectively 64KB.
-    textureDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    textureDesc.MipLevels = 1;
-    textureDesc.Format = textureFormat;
-    textureDesc.Width = textureWidth;
-    textureDesc.Height = textureHeight;
-    textureDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    textureDesc.DepthOrArraySize = 1;
-    textureDesc.SampleDesc.Count = 1;
-    textureDesc.SampleDesc.Quality = 0;
-
-    textures.resize(1);
-
-    for (size_t imageIndex = 7; imageIndex < images.size(); imageIndex++) {
-        // 创建默认堆上的资源,类型是Texture2D,GPU对默认堆资源的访问速度是最快的
-        // 因为纹理资源一般是不易变的资源,所以我们通常使用上传堆复制到默认堆中
-        ThrowIfFailed(device->CreateCommittedResource(
-            &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-            D3D12_HEAP_FLAG_NONE,
-            &textureDesc,                    // 可以使用CD3DX12_RESOURCE_DESC::Tex2D来简化结构体的初始化
-            D3D12_RESOURCE_STATE_COPY_DEST,  // 资源状态(权限标志)
-            nullptr,
-            IID_PPV_ARGS(textures[0].GetAddressOf())));   
+    if (!loadGIF(L"Textures/Kanna1.gif", factory.Get(), gif)) {
+        ThrowIfFailed(E_FAIL);
     }
 
-    // 获取上传堆资源缓冲的大小,这个尺寸通常大于实际图片的尺寸
-    // 注意：这里要将上传堆的尺寸大小对齐到D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT，
-    // 因为后面调用UpdateSubresources的时候，里面的CopyTextureRegion期望传入的
-    // Offset是512的倍数，否则就会报以下的错误：
-    // D3D12 ERROR: ID3D12CommandList::CopyTextureRegion: 
-    // D3D12_PLACED_SUBRESOURCE_FOOTPRINT::Offset must be a multiple of 512, 
-    // aka. D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT. Offset is 1023952.
-    // [ RESOURCE_MANIPULATION ERROR #864: COPYTEXTUREREGION_INVALIDSRCOFFSET]
-    // 官方示例中直接用的GetRequiredIntermediateSize获取到的地址不会有问题
-    // 因为它使用的纹理尺寸是2的N次方，通过GetRequiredIntermediateSize获取
-    // 到的尺寸就是满足要求的。搞了一晚上终于搞定了纹理数组的创建和使用，泪奔~~
-    // 纹理尺寸是32 x 32，GetRequiredIntermediateSize返回8064(比纹理大小32 x 32 x 4(4096)多了几乎一倍)
-    // 纹理尺寸是64 x 64，GetRequiredIntermediateSize返回10384(和纹理大小一样, 64 x 64 x 4)
-    // 纹理尺寸是128 x 128，GetRequiredIntermediateSize返回65536(和纹理大小一样, 128 x 128 x 4)
-    //          Default	Small
-    // Buffer	64 KB	 
-    // Texture	64 KB	4 KB
-    // MSAA texture	4 MB	64 KB
-    const uint64_t uploadBufferStep = d3dUtil::Align(GetRequiredIntermediateSize(textures[0].Get(), 0, 1), D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
-    // const uint64_t uploadBufferStep = GetRequiredIntermediateSize(textures[0].Get(), 0, 1);
-    const uint64_t uploadBufferSize = uploadBufferStep * textures.size();
+    //----------------------------------------------------------------------------------------------------------
+    // 创建Computer Shader 需要的背景 RWTexture2D 资源
+    DXGI_FORMAT RWTextureFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    D3D12_RESOURCE_DESC RWTextureDesc = {};
 
-    device->GetResourceAllocationInfo(0, 1, &textureDesc);
+    RWTextureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    RWTextureDesc.MipLevels = 1;
+    RWTextureDesc.Format= RWTextureFormat;
+    RWTextureDesc.Width = gif.pixelWidth;
+    RWTextureDesc.Height = gif.pixelHeight;
+    RWTextureDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    RWTextureDesc.DepthOrArraySize = 1;
+    RWTextureDesc.SampleDesc.Count = 1;
+    RWTextureDesc.SampleDesc.Quality = 0;
 
-    // 创建用于上传纹理的资源，注意其类型是Buffer。上传堆对于GPU访问来说性能是很差的
-    // 所以对于几乎不变的数据尤其像纹理都是通过它来上传至GPU访问更高效的默认堆中
+    D3D12_HEAP_PROPERTIES heapProperties = {D3D12_HEAP_TYPE_DEFAULT};
+
     ThrowIfFailed(device->CreateCommittedResource(
-        &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+        &heapProperties,
         D3D12_HEAP_FLAG_NONE,
-        &CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize),
-        D3D12_RESOURCE_STATE_GENERIC_READ,
+        &RWTextureDesc,
+        D3D12_RESOURCE_STATE_COMMON,
         nullptr,
-        IID_PPV_ARGS(textureUpload.GetAddressOf())));
+        IID_PPV_ARGS(&RWTexture)));
 
-    for (size_t textureIndex = 0; textureIndex < textures.size(); textureIndex++) {
-        // 按照资源缓冲大小来分配实际图片数据存储的内存大小
-        void* imageData = ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, uploadBufferStep);
+    D3D12_CPU_DESCRIPTOR_HANDLE computeCBVCPUDescriptorHandle(computeCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
-        if (imageData == nullptr) {
-            ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
-        }
+    computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
+    computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
 
-        auto image = images[7];
+    // Compute Shader UAV
+    // RWTexture2D<float4> paint	: register(u0);
+    D3D12_UNORDERED_ACCESS_VIEW_DESC computeUAVDesc = {};
 
-        // 从图片中取出数据
-        HRESULT hr = image->CopyPixels(
-            nullptr,
-            rowPitch,
-            static_cast<uint32_t>(rowPitch * textureHeight),    // 注意这里才是图片数据真实的大小，这个值通常小于缓冲的大小
-            reinterpret_cast<byte*>(imageData));
+    computeUAVDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    computeUAVDesc.Format = RWTexture->GetDesc().Format;
+    computeUAVDesc.Texture1D.MipSlice = 0;
 
-        ThrowIfFailed(hr);
+    device->CreateUnorderedAccessView(RWTexture.Get(), nullptr, &computeUAVDesc, computeCBVCPUDescriptorHandle);
 
-        std::string fileName = "test" + std::to_string(textureIndex) + ".png"; 
+    // uint32_t textureWidth = 0;
+    // uint32_t textureHeight = 0;
+    // uint32_t bpp = 0;
+    // uint32_t rowPitch = 0;
 
-        saveImage(fileName, reinterpret_cast<byte*>(imageData), textureWidth, textureHeight);
+    // // auto images = WICLoadImage(L"Textures/Kanna.gif", textureWidth, textureHeight, bpp, rowPitch, textureFormat);
+    // auto images = WICLoadImage(L"Textures/Kanna0.gif", textureWidth, textureHeight, bpp, rowPitch, textureFormat);
 
-        // 获取向上传堆拷贝纹理数据的一些纹理转换尺寸信息
-        // 对于复杂的DDS纹理这是非常必要的过程
-        uint64_t requiredSize = 0;
-        uint32_t numSubresources = 1;   // 我们只有一副图片，即子资源个数为1
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT textureLayouts;
-        uint64_t textureRowSizes = 0;
-        uint32_t textureRowNum = 0;
+    // D3D12_RESOURCE_DESC textureDesc = {};
 
-        D3D12_RESOURCE_DESC resourceDesc = textures[textureIndex]->GetDesc();
+    // // Alignment must be 64KB (D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) or 0, which is effectively 64KB.
+    // textureDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    // textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    // textureDesc.MipLevels = 1;
+    // textureDesc.Format = textureFormat;
+    // textureDesc.Width = textureWidth;
+    // textureDesc.Height = textureHeight;
+    // textureDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    // textureDesc.DepthOrArraySize = 1;
+    // textureDesc.SampleDesc.Count = 1;
+    // textureDesc.SampleDesc.Quality = 0;
 
-        // 不要把pRowSizeInBytes和D3D12_SUBRESOURCE_FOOTPRINT的RowPitch搞混，
-        // 因为RowPitch是对齐到D3D12_TEXTURE_DATA_PITCH_ALIGNMENT的值
-        // 例如，纹理的宽度为32，每像素4个字节，pRowSizeInBytes的值为128
-        // 而RowPitch的值则是256
-        device->GetCopyableFootprints(
-            &resourceDesc,
-            0,
-            numSubresources,
-            0,
-            &textureLayouts,
-            &textureRowNum,
-            &textureRowSizes,
-            &requiredSize);
+    // textures.resize(1);
 
-        // 因为上传堆实际就是CPU传递数据到GPU的中介，所以我们可以使用
-        // 熟悉的Map方法将它先映射到CPU内存地址中，然后我们按行将数据复制
-        // 到上传堆中。需要注意的是之所以按行拷贝是因为GPU资源的行大小
-        // 与实际图片的行大小是有差异的，二者的内存边界对齐要求是不一样的
-        byte* data = nullptr;
+    // for (size_t imageIndex = 7; imageIndex < images.size(); imageIndex++) {
+    //     // 创建默认堆上的资源,类型是Texture2D,GPU对默认堆资源的访问速度是最快的
+    //     // 因为纹理资源一般是不易变的资源,所以我们通常使用上传堆复制到默认堆中
+    //     ThrowIfFailed(device->CreateCommittedResource(
+    //         &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+    //         D3D12_HEAP_FLAG_NONE,
+    //         &textureDesc,                    // 可以使用CD3DX12_RESOURCE_DESC::Tex2D来简化结构体的初始化
+    //         D3D12_RESOURCE_STATE_COPY_DEST,  // 资源状态(权限标志)
+    //         nullptr,
+    //         IID_PPV_ARGS(textures[0].GetAddressOf())));   
+    // }
 
-        ThrowIfFailed(textureUpload->Map(0, nullptr, reinterpret_cast<void**>(&data)));
+    // // 获取上传堆资源缓冲的大小,这个尺寸通常大于实际图片的尺寸
+    // // 注意：这里要将上传堆的尺寸大小对齐到D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT，
+    // // 因为后面调用UpdateSubresources的时候，里面的CopyTextureRegion期望传入的
+    // // Offset是512的倍数，否则就会报以下的错误：
+    // // D3D12 ERROR: ID3D12CommandList::CopyTextureRegion: 
+    // // D3D12_PLACED_SUBRESOURCE_FOOTPRINT::Offset must be a multiple of 512, 
+    // // aka. D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT. Offset is 1023952.
+    // // [ RESOURCE_MANIPULATION ERROR #864: COPYTEXTUREREGION_INVALIDSRCOFFSET]
+    // // 官方示例中直接用的GetRequiredIntermediateSize获取到的地址不会有问题
+    // // 因为它使用的纹理尺寸是2的N次方，通过GetRequiredIntermediateSize获取
+    // // 到的尺寸就是满足要求的。搞了一晚上终于搞定了纹理数组的创建和使用，泪奔~~
+    // // 纹理尺寸是32 x 32，GetRequiredIntermediateSize返回8064(比纹理大小32 x 32 x 4(4096)多了几乎一倍)
+    // // 纹理尺寸是64 x 64，GetRequiredIntermediateSize返回10384(和纹理大小一样, 64 x 64 x 4)
+    // // 纹理尺寸是128 x 128，GetRequiredIntermediateSize返回65536(和纹理大小一样, 128 x 128 x 4)
+    // //          Default	Small
+    // // Buffer	64 KB	 
+    // // Texture	64 KB	4 KB
+    // // MSAA texture	4 MB	64 KB
+    // const uint64_t uploadBufferStep = d3dUtil::Align(GetRequiredIntermediateSize(textures[0].Get(), 0, 1), D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+    // // const uint64_t uploadBufferStep = GetRequiredIntermediateSize(textures[0].Get(), 0, 1);
+    // const uint64_t uploadBufferSize = uploadBufferStep * textures.size();
 
-        byte* destSlice = reinterpret_cast<byte*>(data) + textureLayouts.Offset * textureIndex;
+    // device->GetResourceAllocationInfo(0, 1, &textureDesc);
 
-        const byte* sourceSlice = reinterpret_cast<const byte*>(imageData);
-        // textureUpload已经经过了对齐操作，所以这里的偏移需要使用D3D12_SUBRESOURCE_FOOTPRINT的RowPitch字段，
-        // 因为经过GetCopyableFootprints函数的填充，RowPitch是按D3D12_TEXTURE_DATA_PITCH_ALIGNMENT对齐的
-        // 而拷贝的时候就需要图片的原始的rowPitch了，之前就是搞混了两者，导致对UpdateSubresources函数的调用
-        // 要么崩溃，要么渲染结果出错
-        for (uint32_t row = 0; row < textureRowNum; row++) {
-            memcpy_s(destSlice + static_cast<SIZE_T>(textureLayouts.Footprint.RowPitch) * row, rowPitch,
-                     sourceSlice + static_cast<SIZE_T>(rowPitch) * row, rowPitch);
-        }
+    // // 创建用于上传纹理的资源，注意其类型是Buffer。上传堆对于GPU访问来说性能是很差的
+    // // 所以对于几乎不变的数据尤其像纹理都是通过它来上传至GPU访问更高效的默认堆中
+    // ThrowIfFailed(device->CreateCommittedResource(
+    //     &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+    //     D3D12_HEAP_FLAG_NONE,
+    //     &CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize),
+    //     D3D12_RESOURCE_STATE_GENERIC_READ,
+    //     nullptr,
+    //     IID_PPV_ARGS(textureUpload.GetAddressOf())));
 
-        // 取消映射，对于易变的数据如每帧的变换矩阵等数据，可以先不Unmap
-        // 让它常驻内存，以提高整体性能，因为每次Map和Unmap是非常耗时的操作
-        textureUpload->Unmap(0, nullptr);
+    // for (size_t textureIndex = 0; textureIndex < textures.size(); textureIndex++) {
+    //     // 按照资源缓冲大小来分配实际图片数据存储的内存大小
+    //     void* imageData = ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, uploadBufferStep);
 
-        // {
-        //     // Copy data to the intermediate upload heap and then schedule
-        //     // a copy from the upload heap to the appropriate texture
-        //     // const UINT D3D12_TEXTURE_DATA_PITCH_ALIGNMENT = 256;        纹理行按256字节对齐
-        //     // const UINT D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT = 512;    纹理整体按512字节
-        //     // 照着官方示例抄代码抄出问题来了，示例中纹理的尺寸大小本身就是对齐的
-        //     D3D12_SUBRESOURCE_DATA  textureData = {};
-        //     textureData.pData = imageData;
-        //     uint32_t channels = bpp / 8;
-        //     textureData.RowPitch =  rowPitch;
-        //     textureData.SlicePitch = rowPitch * textureDesc.Height;
+    //     if (imageData == nullptr) {
+    //         ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
+    //     }
 
-        //     D3D12_RESOURCE_ALLOCATION_INFO info = device->GetResourceAllocationInfo(0, 1, &resourceDesc);
+    //     auto image = images[7];
 
-        //     UpdateSubresources(commandList.Get(), textures[textureIndex].Get(), textureUpload.Get(), textureIndex * uploadBufferStep, 0, 1, &textureData);
-        // }
+    //     // 从图片中取出数据
+    //     HRESULT hr = image->CopyPixels(
+    //         nullptr,
+    //         rowPitch,
+    //         static_cast<uint32_t>(rowPitch * textureHeight),    // 注意这里才是图片数据真实的大小，这个值通常小于缓冲的大小
+    //         reinterpret_cast<byte*>(imageData));
 
-        // 释放图片数据，做一个干净的程序员
-        ::HeapFree(::GetProcessHeap(), 0, imageData);
+    //     ThrowIfFailed(hr);
 
-        // 向命令队列发出从上传堆复制纹理数据到默认堆的命令
-        CD3DX12_TEXTURE_COPY_LOCATION dest(textures[textureIndex].Get(), 0);
-        CD3DX12_TEXTURE_COPY_LOCATION source(textureUpload.Get(), textureLayouts);
-        commandList->CopyTextureRegion(&dest, 0, 0, 0, &source, nullptr);
+    //     std::string fileName = "test" + std::to_string(textureIndex) + ".png"; 
 
-        // 设置一个资源屏障，同步并确认复制操作完成
-        D3D12_RESOURCE_BARRIER resourceBarrier;
-        resourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        resourceBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        resourceBarrier.Transition.pResource = textures[textureIndex].Get();
-        resourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        resourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        resourceBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    //     saveImage(fileName, reinterpret_cast<byte*>(imageData), textureWidth, textureHeight);
 
-        commandList->ResourceBarrier(1, &resourceBarrier);
-    }
+    //     // 获取向上传堆拷贝纹理数据的一些纹理转换尺寸信息
+    //     // 对于复杂的DDS纹理这是非常必要的过程
+    //     uint64_t requiredSize = 0;
+    //     uint32_t numSubresources = 1;   // 我们只有一副图片，即子资源个数为1
+    //     D3D12_PLACED_SUBRESOURCE_FOOTPRINT textureLayouts;
+    //     uint64_t textureRowSizes = 0;
+    //     uint32_t textureRowNum = 0;
+
+    //     D3D12_RESOURCE_DESC resourceDesc = textures[textureIndex]->GetDesc();
+
+    //     // 不要把pRowSizeInBytes和D3D12_SUBRESOURCE_FOOTPRINT的RowPitch搞混，
+    //     // 因为RowPitch是对齐到D3D12_TEXTURE_DATA_PITCH_ALIGNMENT的值
+    //     // 例如，纹理的宽度为32，每像素4个字节，pRowSizeInBytes的值为128
+    //     // 而RowPitch的值则是256
+    //     device->GetCopyableFootprints(
+    //         &resourceDesc,
+    //         0,
+    //         numSubresources,
+    //         0,
+    //         &textureLayouts,
+    //         &textureRowNum,
+    //         &textureRowSizes,
+    //         &requiredSize);
+
+    //     // 因为上传堆实际就是CPU传递数据到GPU的中介，所以我们可以使用
+    //     // 熟悉的Map方法将它先映射到CPU内存地址中，然后我们按行将数据复制
+    //     // 到上传堆中。需要注意的是之所以按行拷贝是因为GPU资源的行大小
+    //     // 与实际图片的行大小是有差异的，二者的内存边界对齐要求是不一样的
+    //     byte* data = nullptr;
+
+    //     ThrowIfFailed(textureUpload->Map(0, nullptr, reinterpret_cast<void**>(&data)));
+
+    //     byte* destSlice = reinterpret_cast<byte*>(data) + textureLayouts.Offset * textureIndex;
+
+    //     const byte* sourceSlice = reinterpret_cast<const byte*>(imageData);
+    //     // textureUpload已经经过了对齐操作，所以这里的偏移需要使用D3D12_SUBRESOURCE_FOOTPRINT的RowPitch字段，
+    //     // 因为经过GetCopyableFootprints函数的填充，RowPitch是按D3D12_TEXTURE_DATA_PITCH_ALIGNMENT对齐的
+    //     // 而拷贝的时候就需要图片的原始的rowPitch了，之前就是搞混了两者，导致对UpdateSubresources函数的调用
+    //     // 要么崩溃，要么渲染结果出错
+    //     for (uint32_t row = 0; row < textureRowNum; row++) {
+    //         memcpy_s(destSlice + static_cast<SIZE_T>(textureLayouts.Footprint.RowPitch) * row, rowPitch,
+    //                  sourceSlice + static_cast<SIZE_T>(rowPitch) * row, rowPitch);
+    //     }
+
+    //     // 取消映射，对于易变的数据如每帧的变换矩阵等数据，可以先不Unmap
+    //     // 让它常驻内存，以提高整体性能，因为每次Map和Unmap是非常耗时的操作
+    //     textureUpload->Unmap(0, nullptr);
+
+    //     // {
+    //     //     // Copy data to the intermediate upload heap and then schedule
+    //     //     // a copy from the upload heap to the appropriate texture
+    //     //     // const UINT D3D12_TEXTURE_DATA_PITCH_ALIGNMENT = 256;        纹理行按256字节对齐
+    //     //     // const UINT D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT = 512;    纹理整体按512字节
+    //     //     // 照着官方示例抄代码抄出问题来了，示例中纹理的尺寸大小本身就是对齐的
+    //     //     D3D12_SUBRESOURCE_DATA  textureData = {};
+    //     //     textureData.pData = imageData;
+    //     //     uint32_t channels = bpp / 8;
+    //     //     textureData.RowPitch =  rowPitch;
+    //     //     textureData.SlicePitch = rowPitch * textureDesc.Height;
+
+    //     //     D3D12_RESOURCE_ALLOCATION_INFO info = device->GetResourceAllocationInfo(0, 1, &resourceDesc);
+
+    //     //     UpdateSubresources(commandList.Get(), textures[textureIndex].Get(), textureUpload.Get(), textureIndex * uploadBufferStep, 0, 1, &textureData);
+    //     // }
+
+    //     // 释放图片数据，做一个干净的程序员
+    //     ::HeapFree(::GetProcessHeap(), 0, imageData);
+
+    //     // 向命令队列发出从上传堆复制纹理数据到默认堆的命令
+    //     CD3DX12_TEXTURE_COPY_LOCATION dest(textures[textureIndex].Get(), 0);
+    //     CD3DX12_TEXTURE_COPY_LOCATION source(textureUpload.Get(), textureLayouts);
+    //     graphicsCommandList->CopyTextureRegion(&dest, 0, 0, 0, &source, nullptr);
+
+    //     // 设置一个资源屏障，同步并确认复制操作完成
+    //     D3D12_RESOURCE_BARRIER resourceBarrier;
+    //     resourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    //     resourceBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    //     resourceBarrier.Transition.pResource = textures[textureIndex].Get();
+    //     resourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    //     resourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    //     resourceBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    //     graphicsCommandList->ResourceBarrier(1, &resourceBarrier);
+    // }
 }
 
-void shapesApp::buildShapeGeometry() {
+void ComputeShaderGIF::buildShapeGeometry() {
     GeometryGenerator geometryGenerator;
 
     GeometryGenerator::MeshData box = geometryGenerator.CreateBox(1.0f, 1.0f, 1.0f, 0);
@@ -935,10 +1140,10 @@ void shapesApp::buildShapeGeometry() {
     CopyMemory(geometry->IndexBufferCPU->GetBufferPointer(), indices.data(), indexBufferByteSize);
 
     geometry->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(),
-    commandList.Get(), vertices.data(), vertexBufferByteSize, geometry->VertexBufferUploader);
+    graphicsCommandList.Get(), vertices.data(), vertexBufferByteSize, geometry->VertexBufferUploader);
 
     geometry->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(),
-    commandList.Get(), indices.data(), indexBufferByteSize, geometry->IndexBufferUploader);
+    graphicsCommandList.Get(), indices.data(), indexBufferByteSize, geometry->IndexBufferUploader);
 
     geometry->VertexByteStride = sizeof(FrameUtil::Vertex);
     geometry->VertexBufferByteSize = vertexBufferByteSize;
@@ -951,7 +1156,7 @@ void shapesApp::buildShapeGeometry() {
     geometries[geometry->Name] = std::move(geometry);
 }
 
-void shapesApp::buildRenderItems() {
+void ComputeShaderGIF::buildRenderItems() {
     auto boxRenderItem = std::make_unique<FrameUtil::RenderItem>();
 
     XMStoreFloat4x4(&boxRenderItem->world, XMMatrixScaling(1.1f, 1.1f, 1.1f) * XMMatrixTranslation(0.0f, 0.0f, 0.0f));
@@ -981,7 +1186,7 @@ void shapesApp::buildRenderItems() {
     }
 }
 
-void shapesApp::updateObjectConstantBuffers() {
+void ComputeShaderGIF::updateObjectConstantBuffers() {
     // 用当前最新的worldViewProject矩阵来更新常量缓冲区
     auto currentObjectConstantBuffer = currentFrameResource->objectConstantBuffer.get();
 
@@ -1002,7 +1207,7 @@ void shapesApp::updateObjectConstantBuffers() {
     }
 }
 
-void shapesApp::updatePassConstantBuffers() {
+void ComputeShaderGIF::updatePassConstantBuffers() {
    // 将球坐标转换为笛卡尔坐标
     float x = radius * sinf(phi) * cosf(theta);
     float z = radius * sinf(phi) * sinf(theta);
@@ -1067,24 +1272,31 @@ void shapesApp::updatePassConstantBuffers() {
     currentFrameResource->materialConstantBuffer->CopyData(0, materialConstants); 
 }
 
-void shapesApp::resetCommandList() {    
+void ComputeShaderGIF::resetCommandList() {    
     // 重置命令列表为执行初始化命令做好准备工作
-    ThrowIfFailed(commandList->Reset(commandAllocator.Get(), nullptr));
+    ThrowIfFailed(graphicsCommandList->Reset(commandAllocator.Get(), nullptr));
 }
 
-void shapesApp::executeCommandList() {
+void ComputeShaderGIF::executeCommandList() {
     // 执行初始化命令
-    ThrowIfFailed(commandList->Close());
-    ID3D12CommandList* commandLists[] = {commandList.Get()};
-    commandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
+    ThrowIfFailed(graphicsCommandList->Close());
+    ID3D12CommandList* commandLists[] = {graphicsCommandList.Get()};
+    graphicsCommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
 }
 
-void shapesApp::prepareFrameResourceSync() {
+void ComputeShaderGIF::prepareComputeResourceSync() {
+    uint64_t fenceValue = ++currentFenceValue;
+    ThrowIfFailed(computeCommandQueue->Signal(fence.Get(), fenceValue));
+    // 3D渲染引擎等待Compute引擎执行结束
+    ThrowIfFailed(computeCommandQueue->Wait(fence.Get(), fenceValue));
+}
+
+void ComputeShaderGIF::prepareFrameResourceSync() {
     currentFrameResource->fenceValue = ++currentFenceValue;
-    commandQueue->Signal(fence.Get(), currentFenceValue);
+    graphicsCommandQueue->Signal(fence.Get(), currentFenceValue);
 }
 
-void shapesApp::frameResourceSync() {
+void ComputeShaderGIF::frameResourceSync() {
     //每帧遍历一个帧资源（多帧的话就是环形遍历）
     currentFrameIndex = (currentFrameIndex + 1) % frameResourcesCount;
     currentFrameResource = frameResources[currentFrameIndex].get();
@@ -1101,7 +1313,7 @@ void shapesApp::frameResourceSync() {
     }
 }
 
-void shapesApp::initImGUI() 
+void ComputeShaderGIF::initImGUI() 
 {
 	// Setup Dear ImGui context
 	IMGUI_CHECKVERSION();
@@ -1120,7 +1332,7 @@ void shapesApp::initImGUI()
 		SRVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 }
 
-void shapesApp::buildImGuiWidgets()
+void ComputeShaderGIF::buildImGuiWidgets()
 {
 	// 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
 	if (showDemoWindow)
@@ -1169,7 +1381,7 @@ void shapesApp::buildImGuiWidgets()
 	}
 }
 
-void shapesApp::updateImGui()
+void ComputeShaderGIF::updateImGui()
 {
 	// Start the Dear ImGui frame
 	ImGui_ImplDX12_NewFrame();
@@ -1177,52 +1389,176 @@ void shapesApp::updateImGui()
 	ImGui::NewFrame();
 }
 
-void shapesApp::renderImGui()
+void ComputeShaderGIF::renderImGui()
 {
 	ImGui::Render();
-	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList.Get());
+	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), graphicsCommandList.Get());
 }
 
-void shapesApp::drawRenderItems(const std::vector<FrameUtil::RenderItem*>& renderItems) {
+void ComputeShaderGIF::compute() {
+    if (gif.currentFrame == 0 || frameIntervalMS >= gifPlayDelay) {
+        ThrowIfFailed(computeCommandAllocator->Reset());
+        ThrowIfFailed(computeCommandList->Reset(computeCommandAllocator.Get(), PSOs["compute"].Get()));
+
+        gifFrame.bmp.Reset();
+        gifFrame.frame.Reset();
+        gifFrame.delay = 0;
+
+        if (!loadGIFFrame(factory.Get(), gif, gifFrame)) {
+            ThrowIfFailed(E_FAIL);
+        }
+
+        gifTexture.Reset();
+        textureUpload.Reset();
+
+        if (!uploadGIFFrame(device.Get(),
+            computeCommandList.Get(),
+            factory.Get(),
+            gifFrame,
+            gifTexture.GetAddressOf(),
+            textureUpload.GetAddressOf())) {
+                ThrowIfFailed(E_FAIL);
+        }
+
+        // 设置GIF的背景色，注意Shader中颜色值一般是RGBA格式
+        gifFrameParam->backgroundColor = XMFLOAT4(
+            ARGB_R(gif.backgroundColor),
+            ARGB_G(gif.backgroundColor),
+            ARGB_B(gif.backgroundColor),
+            ARGB_A(gif.backgroundColor));
+
+        gifFrameParam->currentFrame = gif.currentFrame;
+        gifFrameParam->disposal = gifFrame.disposal;
+
+        gifFrameParam->leftTop[0] = gifFrame.leftTop[0];
+        gifFrameParam->leftTop[1] = gifFrame.leftTop[1];
+        gifFrameParam->size[0] = gifFrame.size[0];
+        gifFrameParam->size[1] = gifFrame.size[1];
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC shaderResourceViewDesc = {};
+
+        shaderResourceViewDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        shaderResourceViewDesc.Format = gifFrame.textureFormat;
+        shaderResourceViewDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        shaderResourceViewDesc.Texture1D.MipLevels = 1;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE computeCBVCPUDescriptorHandle(computeCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+        computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
+        device->CreateShaderResourceView(gifTexture.Get(), &shaderResourceViewDesc, computeCBVCPUDescriptorHandle);
+
+        gifPlayDelay = gifFrame.delay;
+
+        // 更新到下一帧帧号
+        gif.currentFrame = (++gif.currentFrame) % gif.frameCount;
+
+        bReDrawFrame = true;
+    }
+    else {
+        if (!SUCCEEDED(ULongLongSub(gifPlayDelay, static_cast<uint64_t>(frameIntervalMS), &gifPlayDelay))) {
+            // 这个调用失败说明一定是已经超时到下一帧的时间了，那就开始下一循环绘制下一帧
+            gifPlayDelay = 0;
+        }
+
+        // 只更新延迟时间，不绘制
+        bReDrawFrame = false;
+    }
+
+    if (bReDrawFrame) {
+        // 开始计算管线运行
+        D3D12_RESOURCE_BARRIER resourceBeginBarrier = {};
+
+        resourceBeginBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resourceBeginBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        resourceBeginBarrier.Transition.pResource = RWTexture.Get();
+        resourceBeginBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        resourceBeginBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        resourceBeginBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+        computeCommandList->ResourceBarrier(1, &resourceBeginBarrier);
+        computeCommandList->SetPipelineState(PSOs["compute"].Get());
+
+        computeCommandList->SetComputeRootSignature(computeRootSignature.Get());
+
+        ID3D12DescriptorHeap* heaps[] = {computeCBVDescriptorHeap.Get()};
+        computeCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
+
+        D3D12_GPU_DESCRIPTOR_HANDLE computeCBVCPUDescriptorHandle(computeCBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+   
+        computeCommandList->SetComputeRootDescriptorTable(0, computeCBVCPUDescriptorHandle);
+
+        computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
+        computeCommandList->SetComputeRootDescriptorTable(1, computeCBVCPUDescriptorHandle);
+
+        computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
+        computeCommandList->SetComputeRootDescriptorTable(2, computeCBVCPUDescriptorHandle);
+
+        // 执行Compute Shader
+        // 注意：按子帧大小来发起计算线程
+        computeCommandList->Dispatch(gifFrame.size[0], gifFrame.size[1], 1);
+
+        // 开始计算管线运行
+
+        D3D12_RESOURCE_BARRIER resourceEndBarrier = {};
+
+        resourceEndBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resourceEndBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        resourceEndBarrier.Transition.pResource = RWTexture.Get();
+        resourceEndBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        resourceEndBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+        resourceEndBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+        computeCommandList->ResourceBarrier(1, &resourceEndBarrier);
+
+        ThrowIfFailed(computeCommandList->Close());
+
+        // 执行命令列表
+        ID3D12CommandList* commandLists[]= {computeCommandList.Get()};
+        computeCommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
+
+        prepareComputeResourceSync();
+    }
+}
+
+void ComputeShaderGIF::drawRenderItems(const std::vector<FrameUtil::RenderItem*>& renderItems) {
     uint32_t passConstantBufferIndex = frameResourcesCount * objectCount + currentFrameIndex;
     uint32_t materialConstantBufferIndex = frameResourcesCount * (objectCount + 1) + currentFrameIndex;
 
     uint32_t SRVDescriptorIndex = (objectCount + 1 + 1) * frameResourcesCount;
 
-    CD3DX12_GPU_DESCRIPTOR_HANDLE SRVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), SRVDescriptorIndex, CBVSRVUAVDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE SRVDescriptorHandle(graphicsCBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), SRVDescriptorIndex, CBVSRVUAVDescriptorSize);
 
     for (size_t renderItemIndex = 0; renderItemIndex < renderItems.size(); renderItemIndex++) {
         auto renderItem = renderItems[renderItemIndex];
 
-        commandList->IASetVertexBuffers(0, 1, &renderItem->geometry->VertexBufferView());
-        commandList->IASetIndexBuffer(&renderItem->geometry->IndexBufferView());
-        commandList->IASetPrimitiveTopology(renderItem->primitiveType);
+        graphicsCommandList->IASetVertexBuffers(0, 1, &renderItem->geometry->VertexBufferView());
+        graphicsCommandList->IASetIndexBuffer(&renderItem->geometry->IndexBufferView());
+        graphicsCommandList->IASetPrimitiveTopology(renderItem->primitiveType);
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        CD3DX12_GPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(graphicsCBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
         int32_t descriptorHeapIndex = currentFrameIndex * objectCount + static_cast<uint32_t>(renderItemIndex);
 
         CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
-        commandList->SetGraphicsRootDescriptorTable(0, CBVDescriptorHandle);
+        graphicsCommandList->SetGraphicsRootDescriptorTable(0, CBVDescriptorHandle);
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE passCBVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        CD3DX12_GPU_DESCRIPTOR_HANDLE passCBVDescriptorHandle(graphicsCBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
         passCBVDescriptorHandle.Offset(passConstantBufferIndex, CBVSRVUAVDescriptorSize);
 
-        commandList->SetGraphicsRootDescriptorTable(1, passCBVDescriptorHandle);
+        graphicsCommandList->SetGraphicsRootDescriptorTable(1, passCBVDescriptorHandle);
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE materialCBVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        CD3DX12_GPU_DESCRIPTOR_HANDLE materialCBVDescriptorHandle(graphicsCBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
         materialCBVDescriptorHandle.Offset(materialConstantBufferIndex, CBVSRVUAVDescriptorSize);
 
-        commandList->SetGraphicsRootDescriptorTable(2, materialCBVDescriptorHandle);
+        graphicsCommandList->SetGraphicsRootDescriptorTable(2, materialCBVDescriptorHandle);
 
-        commandList->SetGraphicsRootDescriptorTable(3, SRVDescriptorHandle);
+        graphicsCommandList->SetGraphicsRootDescriptorTable(3, SRVDescriptorHandle);
 
-        commandList->SetGraphicsRootDescriptorTable(5, samplerDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        graphicsCommandList->SetGraphicsRootDescriptorTable(5, samplerDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
-        commandList->DrawIndexedInstanced(renderItem->indexCount, 1, renderItem->startIndexLocation, renderItem->baseVertexLocation, 0);
+        graphicsCommandList->DrawIndexedInstanced(renderItem->indexCount, 1, renderItem->startIndexLocation, renderItem->baseVertexLocation, 0);
     }
 }
 
@@ -1242,7 +1578,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance,
 
     try
     {
-        shapesApp app(hInstance, 1280, 720);
+        ComputeShaderGIF app(hInstance, 1280, 720);
         if(!app.initialize())
             return 0;
 
