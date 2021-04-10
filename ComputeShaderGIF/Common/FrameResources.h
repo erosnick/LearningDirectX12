@@ -63,6 +63,14 @@ namespace FrameUtil {
         uint32_t materialIndex;
     };
 
+    struct GIFFrameParam {
+        XMFLOAT4 backgroundColor;
+        uint32_t leftTop[2];
+        uint32_t size[2];
+        uint32_t currentFrame;
+        uint32_t disposal;
+    };
+
     // 为了改进之前CPU和GPU互相等待的低效实现, 让CPU连续处理3帧的绘制命令，
     // 并提交至GPU，当GPU处理完一帧命令后，CPU迅速提交命令，始终保证有3帧的命令储配。
     // 这样的话，如果CPU提交命令的速度高于GPU处理命令的速度，那GPU就会一直处于忙碌的状态，
@@ -80,9 +88,10 @@ namespace FrameUtil {
 
         // 在GPU执行完引用此常量缓冲区的命令之前，我们不能对它进行更新
         // 因此每一帧都要有它们自己的常量缓冲区
-        std::unique_ptr<UploadBuffer<FrameResources::ObjectConstants>> objectConstantBuffer = nullptr;
-        std::unique_ptr<UploadBuffer<FrameResources::PassConstants>> passConstantBuffer = nullptr;
-        std::unique_ptr<UploadBuffer<FrameResources::MaterialConstants>> materialConstantBuffer = nullptr;
+        std::unique_ptr<UploadBuffer<ObjectConstants>> objectConstantBuffer = nullptr;
+        std::unique_ptr<UploadBuffer<PassConstants>> passConstantBuffer = nullptr;
+        std::unique_ptr<UploadBuffer<MaterialConstants>> materialConstantBuffer = nullptr;
+        std::unique_ptr<UploadBuffer<GIFFrameParam>> gifFrameConstantBuffer = nullptr;
 
         // 通过围栏值将命令标记到此围栏点，这使我们可以检测到GPU是否还在使用这些帧资源
         uint64_t fenceValue = 0;

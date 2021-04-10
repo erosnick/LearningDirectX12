@@ -91,7 +91,7 @@ protected:
     static const uint32_t frameBackBufferCount = 3;
     uint32_t currentFrameBackBufferIndex = 0;
 
-    UINT64 currentFenceValue= 0;
+    UINT64 currentFenceValue = 0;
 
     uint32_t DXGIFactoryFlags = 0;
 
@@ -117,6 +117,7 @@ protected:
     ComPtr<IDXGIFactory5> DXGIFactory = nullptr;
 
     ComPtr<ID3D12Fence> fence = nullptr;
+    HANDLE fenceEvent = nullptr;
 
     ComPtr<ID3D12CommandQueue> graphicsCommandQueue = nullptr;
     ComPtr<ID3D12GraphicsCommandList> graphicsCommandList;
@@ -140,5 +141,5 @@ protected:
     float frameInterval = 1.0f / framePerSecond;
     float frameIntervalMS = frameInterval * 1000.0f;
 
-    bool bFrameLimit = false;
+    bool bFrameLimit = true;
 };

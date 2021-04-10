@@ -100,6 +100,151 @@ void ComputeShaderGIF::update(float delta) {
 	buildImGuiWidgets();
 }
 
+void ComputeShaderGIF::compute() {
+    if (gif.currentFrame == 0 || frameIntervalMS >= gifPlayDelay) {
+        ThrowIfFailed(computeCommandAllocator->Reset());
+        ThrowIfFailed(computeCommandList->Reset(computeCommandAllocator.Get(), PSOs["compute"].Get()));
+
+        gifFrame.bmp.Reset();
+        gifFrame.frame.Reset();
+        gifFrame.delay = 0;
+
+        if (!loadGIFFrame(factory.Get(), gif, gifFrame)) {
+            ThrowIfFailed(E_FAIL);
+        }
+
+        gifTexture.Reset();
+        textureUpload.Reset();
+
+        if (!uploadGIFFrame(device.Get(),
+            computeCommandList.Get(),
+            factory.Get(),
+            gifFrame,
+            gifTexture.GetAddressOf(),
+            textureUpload.GetAddressOf())) {
+                ThrowIfFailed(E_FAIL);
+        }
+
+        // 设置GIF的背景色，注意Shader中颜色值一般是RGBA格式
+        FrameUtil::GIFFrameParam gifFrameParam;
+
+        gifFrameParam.backgroundColor = XMFLOAT4(
+            ARGB_R(gif.backgroundColor),
+            ARGB_G(gif.backgroundColor),
+            ARGB_B(gif.backgroundColor),
+            ARGB_A(gif.backgroundColor));
+
+        gifFrameParam.currentFrame = gif.currentFrame;
+        gifFrameParam.disposal = gifFrame.disposal;
+
+        gifFrameParam.leftTop[0] = gifFrame.leftTop[0];
+        gifFrameParam.leftTop[1] = gifFrame.leftTop[1];
+        gifFrameParam.size[0] = gifFrame.size[0];
+        gifFrameParam.size[1] = gifFrame.size[1];
+
+        currentFrameResource->gifFrameConstantBuffer->CopyData(0, gifFrameParam);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC shaderResourceViewDesc = {};
+
+        shaderResourceViewDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        shaderResourceViewDesc.Format = gifFrame.textureFormat;
+        shaderResourceViewDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        shaderResourceViewDesc.Texture1D.MipLevels = 1;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE computeCBVCPUDescriptorHandle(computeCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+        computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize * frameResourcesCount;
+        device->CreateShaderResourceView(gifTexture.Get(), &shaderResourceViewDesc, computeCBVCPUDescriptorHandle);
+
+        gifPlayDelay = gifFrame.delay;
+
+        // 更新到下一帧帧号
+        gif.currentFrame = (++gif.currentFrame) % gif.frameCount;
+
+        bReDrawFrame = true;
+    }
+    else {
+        if (!SUCCEEDED(ULongLongSub(gifPlayDelay, static_cast<uint64_t>(frameIntervalMS), &gifPlayDelay))) {
+            // 这个调用失败说明一定是已经超时到下一帧的时间了，那就开始下一循环绘制下一帧
+            gifPlayDelay = 0;
+        }
+
+        // 只更新延迟时间，不绘制
+        bReDrawFrame = false;
+    }
+
+    if (bReDrawFrame) {
+        // 开始计算管线运行
+        D3D12_RESOURCE_BARRIER resourceBeginBarrier = {};
+
+        resourceBeginBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resourceBeginBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        resourceBeginBarrier.Transition.pResource = RWTexture.Get();
+        resourceBeginBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        resourceBeginBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        resourceBeginBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+        computeCommandList->ResourceBarrier(1, &resourceBeginBarrier);
+        computeCommandList->SetPipelineState(PSOs["compute"].Get());
+
+        computeCommandList->SetComputeRootSignature(computeRootSignature.Get());
+
+        ID3D12DescriptorHeap* heaps[] = {computeCBVDescriptorHeap.Get()};
+        computeCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
+
+        D3D12_GPU_DESCRIPTOR_HANDLE computeCBVGPUDescriptorHandle(computeCBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+        computeCBVGPUDescriptorHandle.ptr += currentFrameIndex * CBVSRVUAVDescriptorSize;
+   
+        computeCommandList->SetComputeRootDescriptorTable(0, computeCBVGPUDescriptorHandle);
+
+        computeCBVGPUDescriptorHandle.ptr += (frameResourcesCount - currentFrameIndex) * CBVSRVUAVDescriptorSize;
+        computeCommandList->SetComputeRootDescriptorTable(1, computeCBVGPUDescriptorHandle);
+
+        computeCBVGPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
+        computeCommandList->SetComputeRootDescriptorTable(2, computeCBVGPUDescriptorHandle);
+
+        // 执行Compute Shader
+        // 注意：按子帧大小来发起计算线程
+        computeCommandList->Dispatch(gifFrame.size[0], gifFrame.size[1], 1);
+
+        // 开始计算管线运行
+
+        D3D12_RESOURCE_BARRIER resourceEndBarrier = {};
+
+        resourceEndBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resourceEndBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        resourceEndBarrier.Transition.pResource = RWTexture.Get();
+        resourceEndBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        resourceEndBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+        resourceEndBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+        computeCommandList->ResourceBarrier(1, &resourceEndBarrier);
+
+        ThrowIfFailed(computeCommandList->Close());
+
+        // 执行命令列表
+        ID3D12CommandList* commandLists[]= {computeCommandList.Get()};
+        computeCommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
+
+        currentFrameResource->fenceValue = currentFenceValue;
+        // computeCommandQueue中的命令执行完毕之后会将ID3D12Fence的值设为currentFrameResource->fenceValue
+        ThrowIfFailed(computeCommandQueue->Signal(fence.Get(), currentFrameResource->fenceValue));
+        // graphicsCommandQueue等待直到ID3D12Fence的值变成currentFrameResource->fenceValue再继续执行
+        // 因为只有当计算着色器更新完GIF纹理之后，图形管线才能读取GIF纹理进行绘制，否则会报以下错误：
+        // D3D12 ERROR: ID3D12CommandQueue::ExecuteCommandLists: Non-simultaneous-access 
+        // Texture Resource (0x00000203BE21DD40:'RWTexture') is still referenced by 
+        // write|transition_barrier GPU operations in-flight on another Command Queue 
+        // (0x00000203BDF9E7A0:'computeCommandQueue'). It is not safe to start read GPU 
+        // operations now on this Command Queue (0x00000203BDDA2D50:'graphicsCommandQueue'). 
+        // This can result in race conditions and application instability. 
+        // [ EXECUTION ERROR #1047: OBJECT_ACCESSED_WHILE_STILL_IN_USE]
+        // 大意就是说RWTexture正在被computeCommandQueue使用(写入)，而graphicsCommandQueue试图读取还在写入状态的
+        // RWTexture，即发生了资源竞争
+        ThrowIfFailed(graphicsCommandQueue->Wait(fence.Get(), currentFrameResource->fenceValue));
+        currentFenceValue++;
+    }
+}
+
 void ComputeShaderGIF::draw(float delta) {
     // 重复使用记录命令的相关内存
     // 只有当与GPU关联的命令列表执行完成时，我们才能将其重置
@@ -144,12 +289,9 @@ void ComputeShaderGIF::draw(float delta) {
     graphicsCommandList->IASetVertexBuffers(0, 1, &boxGeometry->VertexBufferView());
     graphicsCommandList->IASetIndexBuffer(&boxGeometry->IndexBufferView());
 
-    uint32_t passConstantBufferIndex = frameResourcesCount * objectCount + currentFrameIndex;
-
-    uint32_t SRVDescriptorIndex = (objectCount + 1) * frameResourcesCount;
-
     drawRenderItems(opaqueRenderItems);
 
+    uint32_t SRVDescriptorIndex = (objectCount + 1) * frameResourcesCount;
     CD3DX12_GPU_DESCRIPTOR_HANDLE SRVDescriptorHandle(graphicsCBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), SRVDescriptorIndex, CBVSRVUAVDescriptorSize);
 
     graphicsCommandList->SetDescriptorHeaps(1, SRVDescriptorHeap.GetAddressOf());
@@ -176,7 +318,14 @@ void ComputeShaderGIF::draw(float delta) {
 
     currentFrameBackBufferIndex = swapChain->GetCurrentBackBufferIndex();
 
-    prepareFrameResourceSync();
+    // 开始同步GPU与CPU的执行，先记录围栏标记值
+    currentFrameResource->fenceValue = currentFenceValue;
+    // graphicsCommandQueue中的命令执行完毕之后会将ID3D12Fence的值设为currentFrameResource->fenceValue
+    ThrowIfFailed(graphicsCommandQueue->Signal(fence.Get(), currentFrameResource->fenceValue));
+    // computeCommandQueue等待直到ID3D12Fence的值变成currentFrameResource->fenceValue再继续执行
+    ThrowIfFailed(computeCommandQueue->Wait(fence.Get(), currentFrameResource->fenceValue));
+    // ThrowIfFailed(fence->SetEventOnCompletion(currentFenceValue, fenceEvent));
+    currentFenceValue++;
 }
 
 void ComputeShaderGIF::render(float delta) {
@@ -248,9 +397,13 @@ void ComputeShaderGIF::createCommandObjects() {
 
     ThrowIfFailed(device->CreateCommandQueue(&computeCommandQueueDesc, IID_PPV_ARGS(computeCommandQueue.GetAddressOf())));
 
+    computeCommandQueue->SetName(L"computeCommandQueue");
+
     ThrowIfFailed(device->CreateCommandAllocator(computeCommandListType, IID_PPV_ARGS(computeCommandAllocator.GetAddressOf())));
 
     ThrowIfFailed(device->CreateCommandList(0, computeCommandListType, computeCommandAllocator.Get(), nullptr, IID_PPV_ARGS(computeCommandList.GetAddressOf())));
+
+    computeCommandList->SetName(L"computeCommandList");
 
     ThrowIfFailed(computeCommandList->Close());
 }
@@ -283,7 +436,7 @@ void ComputeShaderGIF::createCBVSRVDescriptorHeaps() {
 
     // 创建Compute Shader需要的描述符堆
     D3D12_DESCRIPTOR_HEAP_DESC computeCBVDescriptorHeapDesc;
-    computeCBVDescriptorHeapDesc.NumDescriptors = 3;
+    computeCBVDescriptorHeapDesc.NumDescriptors = frameResourcesCount + 2;
     computeCBVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     computeCBVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     computeCBVDescriptorHeapDesc.NodeMask = 0;
@@ -366,43 +519,49 @@ void ComputeShaderGIF::createConstantBufferViews() {
         device->CreateConstantBufferView(&constantBufferViewDesc, CBVCPUDescriptorHandle);
     }
 
-    uint32_t gifFrameParamConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(GIFFrameParam));
+    uint32_t gifFrameConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::GIFFrameParam));
 
-    D3D12_HEAP_PROPERTIES heapProperties = {D3D12_HEAP_TYPE_UPLOAD};
+    // D3D12_HEAP_PROPERTIES heapProperties = {D3D12_HEAP_TYPE_UPLOAD};
 
-    D3D12_RESOURCE_DESC resourceDesc = {};
+    // D3D12_RESOURCE_DESC resourceDesc = {};
 
-    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-    resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
-    resourceDesc.Width = gifFrameParamConstantBufferSize;
-    resourceDesc.Height = 1;
-    resourceDesc.MipLevels = 1;
-    resourceDesc.DepthOrArraySize = 1;
-    resourceDesc.SampleDesc.Count = 1;
-    resourceDesc.SampleDesc.Quality = 0;
+    // resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    // resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    // resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    // resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+    // resourceDesc.Width = gifFrameParamConstantBufferSize;
+    // resourceDesc.Height = 1;
+    // resourceDesc.MipLevels = 1;
+    // resourceDesc.DepthOrArraySize = 1;
+    // resourceDesc.SampleDesc.Count = 1;
+    // resourceDesc.SampleDesc.Quality = 0;
 
-    ThrowIfFailed(device->CreateCommittedResource(
-        &heapProperties,
-        D3D12_HEAP_FLAG_NONE,
-        &resourceDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(gifFrameParamConstantBuffer.GetAddressOf())));
+    // ThrowIfFailed(device->CreateCommittedResource(
+    //     &heapProperties,
+    //     D3D12_HEAP_FLAG_NONE,
+    //     &resourceDesc,
+    //     D3D12_RESOURCE_STATE_GENERIC_READ,
+    //     nullptr,
+    //     IID_PPV_ARGS(currentFrameResource->gifFrameConstantBuffer)));
 
-    ThrowIfFailed(gifFrameParamConstantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&gifFrameParam)));
+    // ThrowIfFailed(currentFrameResource->gifFrameConstantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&gifFrameParam)));
 
     // Compute CBV
     // cbuffer GIFFrameParam : register(b0)
-    D3D12_CONSTANT_BUFFER_VIEW_DESC computeConstantBufferViewDesc = {};
-
-    computeConstantBufferViewDesc.BufferLocation = gifFrameParamConstantBuffer->GetGPUVirtualAddress();
-    computeConstantBufferViewDesc.SizeInBytes = gifFrameParamConstantBufferSize;
-
     D3D12_CPU_DESCRIPTOR_HANDLE computeCBVCPUDescriptorHandle(computeCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
-    device->CreateConstantBufferView(&computeConstantBufferViewDesc, computeCBVCPUDescriptorHandle);
+    for (uint32_t frameResourceIndex = 0; frameResourceIndex < frameResourcesCount; frameResourceIndex++) {
+        auto& gifFrameConstantBuffer = frameResources[frameResourceIndex]->gifFrameConstantBuffer;
+
+        D3D12_CONSTANT_BUFFER_VIEW_DESC computeConstantBufferViewDesc = {};
+
+        computeConstantBufferViewDesc.BufferLocation = gifFrameConstantBuffer->Resource()->GetGPUVirtualAddress();
+        computeConstantBufferViewDesc.SizeInBytes = gifFrameConstantBufferSize;
+
+        device->CreateConstantBufferView(&computeConstantBufferViewDesc, computeCBVCPUDescriptorHandle);
+        
+        computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
+    }
 }
 
 void ComputeShaderGIF::createShaderResourceView() {
@@ -597,18 +756,18 @@ void ComputeShaderGIF::createComputeRootSignature() {
     ranges[0].NumDescriptors = 1;   // 1 Constant Buffer View + 1 Texture View
     ranges[0].BaseShaderRegister = 0;
     ranges[0].RegisterSpace = 0;
-    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
 
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[1].NumDescriptors = 1;   // 1 Constant Buffer View + 1 Texture View
+    ranges[1].NumDescriptors = 1;   // 1 Shader Resource View View
     ranges[1].BaseShaderRegister = 0;
     ranges[1].RegisterSpace = 0;
-    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;;
     ranges[1].OffsetInDescriptorsFromTableStart = 0;
 
     ranges[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[2].NumDescriptors = 1;   // 1 Constant Buffer View + 1 Texture View
+    ranges[2].NumDescriptors = 1;   // 1 Unordered Access View
     ranges[2].BaseShaderRegister = 0;
     ranges[2].RegisterSpace = 0;
     ranges[2].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
@@ -649,6 +808,8 @@ void ComputeShaderGIF::createComputeRootSignature() {
         serializedRootSignature->GetBufferPointer(),
         serializedRootSignature->GetBufferSize(),
         IID_PPV_ARGS(computeRootSignature.GetAddressOf())));
+
+    computeRootSignature->SetName(L"computeRootSignature");
 }
 
 void ComputeShaderGIF::createShadersAndInputLayout() {
@@ -882,7 +1043,7 @@ void ComputeShaderGIF::loadResources() {
 
     D3D12_CPU_DESCRIPTOR_HANDLE computeCBVCPUDescriptorHandle(computeCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
-    computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
+    computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize * frameResourcesCount;
     computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
 
     // Compute Shader UAV
@@ -1285,15 +1446,17 @@ void ComputeShaderGIF::executeCommandList() {
 }
 
 void ComputeShaderGIF::prepareComputeResourceSync() {
-    uint64_t fenceValue = ++currentFenceValue;
-    ThrowIfFailed(computeCommandQueue->Signal(fence.Get(), fenceValue));
+    currentFrameResource->fenceValue = ++currentFenceValue;
+    ThrowIfFailed(computeCommandQueue->Signal(fence.Get(), currentFenceValue));
     // 3D渲染引擎等待Compute引擎执行结束
-    ThrowIfFailed(computeCommandQueue->Wait(fence.Get(), fenceValue));
+    ThrowIfFailed(graphicsCommandQueue->Wait(fence.Get(), currentFenceValue));
+    currentFenceValue++;
 }
 
 void ComputeShaderGIF::prepareFrameResourceSync() {
     currentFrameResource->fenceValue = ++currentFenceValue;
     graphicsCommandQueue->Signal(fence.Get(), currentFenceValue);
+    computeCommandQueue->Wait(fence.Get(), currentFenceValue);
 }
 
 void ComputeShaderGIF::frameResourceSync() {
@@ -1356,6 +1519,7 @@ void ComputeShaderGIF::buildImGuiWidgets()
 			ImGui::Checkbox("Demo Window", &showDemoWindow);      // Edit bools storing our window open/close state
 			ImGui::Checkbox("Another Window", &showAnotherWindow);
             ImGui::Checkbox("Wireframe", &isWireframe);
+            ImGui::Checkbox("FPS Limit", &bFrameLimit);
 
 			ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
 			ImGui::ColorEdit3("clear color", (float*)&clearColor); // Edit 3 floats representing a color
@@ -1393,130 +1557,6 @@ void ComputeShaderGIF::renderImGui()
 {
 	ImGui::Render();
 	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), graphicsCommandList.Get());
-}
-
-void ComputeShaderGIF::compute() {
-    if (gif.currentFrame == 0 || frameIntervalMS >= gifPlayDelay) {
-        ThrowIfFailed(computeCommandAllocator->Reset());
-        ThrowIfFailed(computeCommandList->Reset(computeCommandAllocator.Get(), PSOs["compute"].Get()));
-
-        gifFrame.bmp.Reset();
-        gifFrame.frame.Reset();
-        gifFrame.delay = 0;
-
-        if (!loadGIFFrame(factory.Get(), gif, gifFrame)) {
-            ThrowIfFailed(E_FAIL);
-        }
-
-        gifTexture.Reset();
-        textureUpload.Reset();
-
-        if (!uploadGIFFrame(device.Get(),
-            computeCommandList.Get(),
-            factory.Get(),
-            gifFrame,
-            gifTexture.GetAddressOf(),
-            textureUpload.GetAddressOf())) {
-                ThrowIfFailed(E_FAIL);
-        }
-
-        // 设置GIF的背景色，注意Shader中颜色值一般是RGBA格式
-        gifFrameParam->backgroundColor = XMFLOAT4(
-            ARGB_R(gif.backgroundColor),
-            ARGB_G(gif.backgroundColor),
-            ARGB_B(gif.backgroundColor),
-            ARGB_A(gif.backgroundColor));
-
-        gifFrameParam->currentFrame = gif.currentFrame;
-        gifFrameParam->disposal = gifFrame.disposal;
-
-        gifFrameParam->leftTop[0] = gifFrame.leftTop[0];
-        gifFrameParam->leftTop[1] = gifFrame.leftTop[1];
-        gifFrameParam->size[0] = gifFrame.size[0];
-        gifFrameParam->size[1] = gifFrame.size[1];
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC shaderResourceViewDesc = {};
-
-        shaderResourceViewDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        shaderResourceViewDesc.Format = gifFrame.textureFormat;
-        shaderResourceViewDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        shaderResourceViewDesc.Texture1D.MipLevels = 1;
-
-        D3D12_CPU_DESCRIPTOR_HANDLE computeCBVCPUDescriptorHandle(computeCBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
-        computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
-        device->CreateShaderResourceView(gifTexture.Get(), &shaderResourceViewDesc, computeCBVCPUDescriptorHandle);
-
-        gifPlayDelay = gifFrame.delay;
-
-        // 更新到下一帧帧号
-        gif.currentFrame = (++gif.currentFrame) % gif.frameCount;
-
-        bReDrawFrame = true;
-    }
-    else {
-        if (!SUCCEEDED(ULongLongSub(gifPlayDelay, static_cast<uint64_t>(frameIntervalMS), &gifPlayDelay))) {
-            // 这个调用失败说明一定是已经超时到下一帧的时间了，那就开始下一循环绘制下一帧
-            gifPlayDelay = 0;
-        }
-
-        // 只更新延迟时间，不绘制
-        bReDrawFrame = false;
-    }
-
-    if (bReDrawFrame) {
-        // 开始计算管线运行
-        D3D12_RESOURCE_BARRIER resourceBeginBarrier = {};
-
-        resourceBeginBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        resourceBeginBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        resourceBeginBarrier.Transition.pResource = RWTexture.Get();
-        resourceBeginBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-        resourceBeginBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        resourceBeginBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-
-        computeCommandList->ResourceBarrier(1, &resourceBeginBarrier);
-        computeCommandList->SetPipelineState(PSOs["compute"].Get());
-
-        computeCommandList->SetComputeRootSignature(computeRootSignature.Get());
-
-        ID3D12DescriptorHeap* heaps[] = {computeCBVDescriptorHeap.Get()};
-        computeCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
-
-        D3D12_GPU_DESCRIPTOR_HANDLE computeCBVCPUDescriptorHandle(computeCBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
-   
-        computeCommandList->SetComputeRootDescriptorTable(0, computeCBVCPUDescriptorHandle);
-
-        computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
-        computeCommandList->SetComputeRootDescriptorTable(1, computeCBVCPUDescriptorHandle);
-
-        computeCBVCPUDescriptorHandle.ptr += CBVSRVUAVDescriptorSize;
-        computeCommandList->SetComputeRootDescriptorTable(2, computeCBVCPUDescriptorHandle);
-
-        // 执行Compute Shader
-        // 注意：按子帧大小来发起计算线程
-        computeCommandList->Dispatch(gifFrame.size[0], gifFrame.size[1], 1);
-
-        // 开始计算管线运行
-
-        D3D12_RESOURCE_BARRIER resourceEndBarrier = {};
-
-        resourceEndBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        resourceEndBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        resourceEndBarrier.Transition.pResource = RWTexture.Get();
-        resourceEndBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        resourceEndBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
-        resourceEndBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-
-        computeCommandList->ResourceBarrier(1, &resourceEndBarrier);
-
-        ThrowIfFailed(computeCommandList->Close());
-
-        // 执行命令列表
-        ID3D12CommandList* commandLists[]= {computeCommandList.Get()};
-        computeCommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
-
-        prepareComputeResourceSync();
-    }
 }
 
 void ComputeShaderGIF::drawRenderItems(const std::vector<FrameUtil::RenderItem*>& renderItems) {

@@ -10,5 +10,6 @@ namespace FrameUtil {
         objectConstantBuffer = std::make_unique<UploadBuffer<ObjectConstants>>(device, objectCount, true);
         passConstantBuffer = std::make_unique<UploadBuffer<PassConstants>>(device, passCount, true);
         materialConstantBuffer = std::make_unique<UploadBuffer<MaterialConstants>>(device, materialCount, true);
+        gifFrameConstantBuffer = std::make_unique<UploadBuffer<GIFFrameParam>>(device, 1, true);
     }
 }

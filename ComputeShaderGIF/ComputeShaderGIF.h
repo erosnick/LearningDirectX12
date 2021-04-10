@@ -28,6 +28,7 @@ protected:
 
 	virtual void onResize() override; 
 	virtual void update(float delta)  override;
+    void compute();
     virtual void draw(float delta)  override;
     virtual void render(float delta)  override;
 
@@ -70,7 +71,6 @@ protected:
 	void buildImGuiWidgets();
 	void updateImGui();
 	void renderImGui();
-    void compute();
     void drawRenderItems(const std::vector<FrameUtil::RenderItem*>& renderItems);
 
 private:
@@ -105,12 +105,9 @@ private:
 
     ComPtr<ID3D12Resource> gifTexture;
     ComPtr<ID3D12Resource> RWTexture;
-    ComPtr<ID3D12Resource> gifFrameParamConstantBuffer;
 
     std::vector<ComPtr<ID3D12Resource>> textures;
     ComPtr<ID3D12Resource> textureUpload;
-
-    GIFFrameParam* gifFrameParam;
 
     GIFFrame gifFrame = {};
 

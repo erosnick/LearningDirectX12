@@ -436,6 +436,12 @@ void d3dApp::checkMSAASupport() {
 
 void d3dApp::createFence() {
     ThrowIfFailed(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())));
+
+    fenceEvent = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
+
+    if (fenceEvent == nullptr) {
+        ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
+    }
 }
 
 void d3dApp::createCommandObjects() {
@@ -647,7 +653,7 @@ int32_t d3dApp::run() {
 
     timer.Tick();
 
-    float simulatedTime = 0.0f;
+    float simulatedTime = timer.TotalTime();
 
 	while(msg.message != WM_QUIT)
 	{
@@ -662,16 +668,20 @@ int32_t d3dApp::run() {
         {	
 			timer.Tick();
 
-            float realTime = timer.TotalTime();
+            if (bFrameLimit) {
+                float realTime = timer.TotalTime();
 
-            while (simulatedTime < realTime) {
-                if (bFrameLimit) {
+                while (simulatedTime < realTime) {
                     simulatedTime += 0.016667f;
+                    calculateFrameStats();
+                    update(0.016667f);	
+                    render(0.016667f);
                 }
-
-                calculateFrameStats();
-				update(0.016667f);	
-                render(0.016667f);
+            }
+            else {
+                    calculateFrameStats();
+                    update(0.016667f);	
+                    render(0.016667f);
             }
         }
     }

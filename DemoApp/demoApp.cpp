@@ -111,9 +111,9 @@ void demoApp::update(float delta) {
     XMMATRIX newView = XMMatrixIdentity();
     // XMMATRIX newView = XMMatrixLookAtLH(position, target, up);
 
-    newView.r[0] = XMVectorSet(tempRight.x, tempRight.y, tempRight.z, 0.0f);
-    newView.r[1] = XMVectorSet(tempUp.x, tempUp.y, tempUp.z, 0.0f);
-    newView.r[2] = XMVectorSet(tempForward.x, tempForward.y, tempForward.z, 0.0f);
+    newView.r[0] = XMVectorSet(tempRight.x, tempUp.x, tempForward.x, 0.0f);
+    newView.r[1] = XMVectorSet(tempRight.y, tempUp.y, tempForward.y, 0.0f);
+    newView.r[2] = XMVectorSet(tempRight.z, tempUp.z, tempForward.z, 0.0f);
     
     float tx = -XMVectorGetX(XMVector3Dot(position, right));
     float ty = -XMVectorGetX(XMVector3Dot(position, up));
@@ -249,7 +249,7 @@ void demoApp::onMouseMove(WPARAM btnState, int32_t x, int32_t y) {
         // 根据鼠标的移动距离计算旋转角度，并令每个像素都按此
         // 角度的1 / 4 旋转
         float dx = XMConvertToRadians(0.25f * static_cast<float>(x - lastMousePosition.x));
-        float dy = XMConvertToRadians(0.25f * static_cast<float>(x - lastMousePosition.x));
+        float dy = XMConvertToRadians(0.25f * static_cast<float>(y - lastMousePosition.y));
 
         // 根据鼠标的输入来更新摄像机绕立方体旋转的角度
         theta += dx;

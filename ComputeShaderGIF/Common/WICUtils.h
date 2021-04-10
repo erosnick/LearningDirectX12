@@ -256,14 +256,6 @@ struct GIFFrame {
 	uint32_t					  size[2];
 };
 
-struct GIFFrameParam {
-	XMFLOAT4 backgroundColor;
-	uint32_t leftTop[2];
-	uint32_t size[2];
-	uint32_t currentFrame;
-	uint32_t disposal;
-};
-
 bool loadGIF(wchar_t* fileName, IWICImagingFactory* factory, GIF& gif, const WICColor& defaultBackgroundColor = 0u) {
 	PROPVARIANT propValue = {};
 	unsigned char backgroundColorIndex = 0;
