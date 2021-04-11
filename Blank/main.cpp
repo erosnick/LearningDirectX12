@@ -31,6 +31,10 @@ struct Vertex {
     XMFLOAT4 color;
 };
 
+struct ObjectConstantBuffer {
+    XMFLOAT4X4 world;
+};
+
 class DxException
 {
 public:
@@ -166,6 +170,10 @@ std::string loadShader(const std::string& binaryName) {
     return shaderData;
 }
 
+uint32_t calculateConstantBufferSize(uint32_t size) {
+    return (size + 255) & (~255);
+}
+
 const wchar_t* WINDOW_CLASS_NAME = L"Game Window Class";
 const wchar_t* WINDOW_TITLE = L"DirectX 12 Sample";
 
@@ -205,18 +213,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
     uint64_t fenceValue = 0;
     HANDLE fenceEvent = nullptr;
 
-    ComPtr<IDXGIFactory5>           DXGIFactory; 
-    ComPtr<IDXGIAdapter1>           adapter;
-    ComPtr<ID3D12Device4>           device;
+    ComPtr<IDXGIFactory5>               DXGIFactory; 
+    ComPtr<IDXGIAdapter1>               adapter;
+    ComPtr<ID3D12Device4>               device;
     ComPtr<IDXGISwapChain1>             temporarySwapChain;
     ComPtr<IDXGISwapChain3>             swapChain;
     ComPtr<ID3D12DescriptorHeap>        RTVDescriptorHeap;
+    ComPtr<ID3D12DescriptorHeap>        CBVDescriptorHeap;
     ComPtr<ID3D12CommandQueue>          commandQueue;
     ComPtr<ID3D12CommandAllocator>      commandAllocator;
     ComPtr<ID3D12GraphicsCommandList>   commandList;
     ComPtr<ID3D12RootSignature>         rootSignature;
     ComPtr<ID3D12PipelineState>         PSO;
     ComPtr<ID3D12Resource>              vertexBuffer;
+    ComPtr<ID3D12Resource>              constantBuffer;
     ComPtr<ID3D12Resource>              renderTargets[backBufferCount];
     ComPtr<ID3D12Fence>                 fence;
 
@@ -254,128 +264,231 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
     try {
 
+        #if defined(_DEBUG)
+                {   //打开显示子系统的调试支持
+                    ComPtr<ID3D12Debug> debugController;
+                    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
+                    {
+                        debugController->EnableDebugLayer();
+                        // 打开附加的调试支持
+                        DXGIFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+                    }
+                }
+        #endif
+
         // 1.创建IDXGIFactory
         CreateDXGIFactory2(DXGIFactoryFlags, IID_PPV_ARGS(DXGIFactory.GetAddressOf()));
+        // 关闭Alt + Enter键切换全屏的功能，因为我们没有实现OnSize处理，所以先关闭
+        ThrowIfFailed(DXGIFactory->MakeWindowAssociation(hWnd, DXGI_MWA_NO_ALT_ENTER));
 
-        // 2.枚举适配器，获得性能最强的
-        uint32_t adapterIndex = 0;
-        DXGI_ADAPTER_DESC1 adapterDesc = {};
-        while (DXGIFactory->EnumAdapters1(adapterIndex, adapter.GetAddressOf()) != DXGI_ERROR_NOT_FOUND) {
+        // 2.获取代表独显的的适配器(IDXGIAdapter)
+        for (uint32_t adapterIndex = 0; 
+            DXGIFactory->EnumAdapters1(adapterIndex, adapter.GetAddressOf()) != DXGI_ERROR_NOT_FOUND; 
+            adapterIndex++) {
+            DXGI_ADAPTER_DESC1 adapterDesc = {};
             adapter->GetDesc1(&adapterDesc);
 
-            // 软件虚拟适配器，跳过
             if (adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+                // 软件虚拟适配器，跳过
                 continue;
             }
 
-            // 3.检测适配器对D3D12.1特性等级(Feature Level)的支持情况
+            // 3.检查适配器对12.1特性等级(Feature Level)的支持
+            // 检查适配器对D3D12支持的兼容级别，这里直接要求支持12.1的能力，
+            // 注意返回接口的那个参数被置为了nullptr，这样就不会实际创建一个
+            // 设备了，也不用我们啰嗦的再调用release来释放接口。这也是一个
+            // 重要的技巧，请记住！
             if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, _uuidof(ID3D12Device), nullptr))) {
                 break;
             }
-            
-            adapterIndex++;
         }
 
-        // 4.实际进行设备的创建(ID3D12Device)
+        // 4.实际进行设备创建(ID3D12Device)
         ThrowIfFailed(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(device.GetAddressOf())));
 
-        // 5.创建命令列表(ID3D12CommandQueue)
-        D3D12_COMMAND_QUEUE_DESC commandQueueDesc;
-        commandQueueDesc.NodeMask = 0;
-        commandQueueDesc.Priority = 0;
-        commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        commandQueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+        // 5.创建命令队列(ID3D12CommandQueue)
+        // struct D3D12_COMMAND_QUEUE_DESC
+        // {
+        //     D3D12_COMMAND_LIST_TYPE Type;
+        //     INT Priority;
+        //     D3D12_COMMAND_QUEUE_FLAGS Flags;
+        //     UINT NodeMask;
+        // };
 
-        ThrowIfFailed(device->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(commandQueue.GetAddressOf())));
+        // enum D3D12_COMMAND_LIST_TYPE
+        // {
+        //     D3D12_COMMAND_LIST_TYPE_DIRECT	= 0,
+        //     D3D12_COMMAND_LIST_TYPE_BUNDLE	= 1,
+        //     D3D12_COMMAND_LIST_TYPE_COMPUTE	= 2,
+        //     D3D12_COMMAND_LIST_TYPE_COPY	= 3,
+        //     D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE	= 4,
+        //     D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS	= 5,
+        //     D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE	= 6
+        // };
+        D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;    // 表示“全能型”命令队列
 
-        // 6.创建交换链(ID3D12SwapChain)
+        ThrowIfFailed(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(commandQueue.GetAddressOf())));
+
+        // 6.创建交换链(IDXGISwapChain)
         DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
-        swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-        swapChainDesc.Format = backBufferFormt;
         swapChainDesc.BufferCount = backBufferCount;
-        swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         swapChainDesc.Width = width;
         swapChainDesc.Height = height;
+        swapChainDesc.Format = backBufferFormt;
+        swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         swapChainDesc.SampleDesc.Count = 1;
         swapChainDesc.SampleDesc.Quality = 0;
-        swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
         ThrowIfFailed(DXGIFactory->CreateSwapChainForHwnd(
-            commandQueue.Get(), 
-            hWnd, 
-            &swapChainDesc, 
+            commandQueue.Get(),   // 命令队列(For Direct3D 12 this is a pointer to a direct command queue)
+            hWnd,                 // 窗口句柄
+            &swapChainDesc,       // 交换链描述
             nullptr, 
             nullptr, 
-            temporarySwapChain.GetAddressOf()));
+            temporarySwapChain.GetAddressOf()   // 创建好的交换链
+            ));
 
-        // 从ID3D12SwapChain1接口查询高版本的ID3D12SwapChain3接口
         ThrowIfFailed(temporarySwapChain.As(&swapChain));
 
+        // 从IDXGISwapChain1获得高版本的IDXGISwapChain3
+        backBufferIndex = swapChain->GetCurrentBackBufferIndex();
+
         // 7.创建RTV描述符堆(ID3D12DescriptorHeap)
-        D3D12_DESCRIPTOR_HEAP_DESC RTVDescriptorHeapDesc;
-        RTVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        D3D12_DESCRIPTOR_HEAP_DESC RTVDescriptorHeapDesc = {};
         RTVDescriptorHeapDesc.NumDescriptors = backBufferCount;
+        RTVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         RTVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-        RTVDescriptorHeapDesc.NodeMask = 0;
 
         ThrowIfFailed(device->CreateDescriptorHeap(&RTVDescriptorHeapDesc, IID_PPV_ARGS(RTVDescriptorHeap.GetAddressOf())));
 
-        // 8.创建RTV描述符(Render Targets)
+        D3D12_DESCRIPTOR_HEAP_DESC CBVDescriptorHeapDesc = {};
+        CBVDescriptorHeapDesc.NumDescriptors = 1;
+        CBVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        CBVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+        ThrowIfFailed(device->CreateDescriptorHeap(&CBVDescriptorHeapDesc, IID_PPV_ARGS(CBVDescriptorHeap.GetAddressOf())));
+
+        // 8.创建RTV描述符(Descriptor)
         // 获取RTV描述符大小
         RTVDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-        CD3DX12_CPU_DESCRIPTOR_HANDLE RTVCPUDescriptorHandle(RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+        CD3DX12_CPU_DESCRIPTOR_HANDLE RTVDescriptorHandle(RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
-        for(uint32_t backBufferIndex = 0; backBufferIndex < backBufferCount; backBufferIndex++) {
+        for (uint32_t backBufferIndex = 0; backBufferIndex < backBufferCount; backBufferIndex++) {
             ThrowIfFailed(swapChain->GetBuffer(backBufferIndex, IID_PPV_ARGS(renderTargets[backBufferIndex].GetAddressOf())));
-            device->CreateRenderTargetView(renderTargets[backBufferIndex].Get(), nullptr, RTVCPUDescriptorHandle);
-            RTVCPUDescriptorHandle.Offset(1, RTVDescriptorSize);
+            device->CreateRenderTargetView(renderTargets[backBufferIndex].Get(), nullptr, RTVDescriptorHandle);
+            RTVDescriptorHandle.Offset(1, RTVDescriptorSize);
         }
 
         // 9.创建根签名(ID3D12RootSignature)
-        CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
-        rootSignatureDesc.Init_1_1(0, nullptr, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
-
-        ComPtr<ID3DBlob> rootSignatureData;
+        ComPtr<ID3DBlob> signature;
         ComPtr<ID3DBlob> error;
 
-        ThrowIfFailed(D3D12SerializeVersionedRootSignature(&rootSignatureDesc, rootSignatureData.GetAddressOf(), error.GetAddressOf()));
+        CD3DX12_DESCRIPTOR_RANGE1 descriptorRange;
+
+        descriptorRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0);
+
+        CD3DX12_ROOT_PARAMETER1 rootParameter;
+
+        rootParameter.InitAsDescriptorTable(1, &descriptorRange, D3D12_SHADER_VISIBILITY_VERTEX);
+
+        CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
+        rootSignatureDesc.Init_1_1(1, &rootParameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        ThrowIfFailed(D3D12SerializeVersionedRootSignature(&rootSignatureDesc, &signature, &error));
 
         ThrowIfFailed(device->CreateRootSignature(
-            0,
-            rootSignatureData->GetBufferPointer(), 
-            rootSignatureData->GetBufferSize(), 
+            0, 
+            signature->GetBufferPointer(), 
+            signature->GetBufferSize(), 
             IID_PPV_ARGS(rootSignature.GetAddressOf())));
 
-        // 10.编译和加载Shader(使用dxc进行离线编译，然后加载编译好的二进制字节码)
-        std::string vertexShaderData = loadShader("Shaders/vs.bin");
-        std::string pixelShaderData = loadShader("Shaders/ps.bin");
+        // 10.编译&加载Shader(Shader在项目构建之前通过dxc进行了离线编译)
+        // 这里只需加载编译好的二进制代码即可
+        std::string vertexShader = loadShader("Shaders/vs.bin");
+        std::string pixelShader = loadShader("Shaders/ps.bin");
 
+        // 10.创建顶点输入布局(Input Layout)
+        // struct D3D12_INPUT_ELEMENT_DESC
+        // {
+        //     LPCSTR SemanticName;
+        //     UINT SemanticIndex;
+        //     DXGI_FORMAT Format;
+        //     UINT InputSlot;
+        //     UINT AlignedByteOffset;
+        //     D3D12_INPUT_CLASSIFICATION InputSlotClass;
+        //     UINT InstanceDataStepRate;
+        // }; 
         D3D12_INPUT_ELEMENT_DESC inputElementDesc[] = {
             {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-            {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}
         };
 
         D3D12_INPUT_LAYOUT_DESC inputLayout = {inputElementDesc, _countof(inputElementDesc)};
 
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC PSODesc = {};
-        PSODesc.InputLayout = inputLayout;
-        PSODesc.pRootSignature = rootSignature.Get();
-        PSODesc.VS = {vertexShaderData.data(), vertexShaderData.size()};
-        PSODesc.PS = {pixelShaderData.data(), pixelShaderData.size()};
-        PSODesc.NodeMask = 0;
-        PSODesc.NumRenderTargets = 1;
-        PSODesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        PSODesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        PSODesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-        PSODesc.DepthStencilState.DepthEnable = false;
-        PSODesc.DepthStencilState.StencilEnable = false;
-        PSODesc.SampleDesc.Count = 1;
-        PSODesc.SampleDesc.Quality = 0;
-        PSODesc.SampleMask = UINT_MAX;
-        PSODesc.RTVFormats[0] = backBufferFormt;
+        // 11.创建渲染管线状态对象(ID3D12PipelineStateObject)
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicsPipelineStateDesc = {};
+        graphicsPipelineStateDesc.InputLayout = inputLayout;
+        graphicsPipelineStateDesc.pRootSignature = rootSignature.Get();
+        graphicsPipelineStateDesc.VS = {vertexShader.data(), vertexShader.size()};
+        graphicsPipelineStateDesc.PS = {pixelShader.data(), pixelShader.size()};
+        // CD3DX12_RASTERIZER_DESC( CD3DX12_DEFAULT )
+        // {
+        //     FillMode = D3D12_FILL_MODE_SOLID;
+        //     CullMode = D3D12_CULL_MODE_BACK;
+        //     FrontCounterClockwise = FALSE;
+        //     DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+        //     DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+        //     SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+        //     DepthClipEnable = TRUE;
+        //     MultisampleEnable = FALSE;
+        //     AntialiasedLineEnable = FALSE;
+        //     ForcedSampleCount = 0;
+        //     ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+        // }
+        graphicsPipelineStateDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        // CD3DX12_BLEND_DESC( CD3DX12_DEFAULT )
+        // {
+        //     AlphaToCoverageEnable = FALSE;
+        //     IndependentBlendEnable = FALSE;
+        //     const D3D12_RENDER_TARGET_BLEND_DESC defaultRenderTargetBlendDesc =
+        //     {
+        //         FALSE,FALSE,
+        //         D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
+        //         D3D12_BLEND_ONE, D3D12_BLEND_ZERO, D3D12_BLEND_OP_ADD,
+        //         D3D12_LOGIC_OP_NOOP,
+        //         D3D12_COLOR_WRITE_ENABLE_ALL,
+        //     };
+        //     for (UINT i = 0; i < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+        //         RenderTarget[ i ] = defaultRenderTargetBlendDesc;
+        // }
+        graphicsPipelineStateDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        // CD3DX12_DEPTH_STENCIL_DESC( CD3DX12_DEFAULT )
+        // {
+        //     DepthEnable = TRUE;
+        //     DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        //     DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        //     StencilEnable = FALSE;
+        //     StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+        //     StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+        //     const D3D12_DEPTH_STENCILOP_DESC defaultStencilOp =
+        //     { D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS };
+        //     FrontFace = defaultStencilOp;
+        //     BackFace = defaultStencilOp;
+        // }
+        // graphicsPipelineStateDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        graphicsPipelineStateDesc.DepthStencilState.DepthEnable = false;
+        graphicsPipelineStateDesc.DepthStencilState.StencilEnable = false;
+        graphicsPipelineStateDesc.SampleMask = UINT_MAX;
+        graphicsPipelineStateDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        graphicsPipelineStateDesc.NumRenderTargets = 1;
+        graphicsPipelineStateDesc.RTVFormats[0] = backBufferFormt;
+        graphicsPipelineStateDesc.SampleDesc.Count = 1;
+        graphicsPipelineStateDesc.SampleDesc.Quality = 0;
 
-        ThrowIfFailed(device->CreateGraphicsPipelineState(&PSODesc, IID_PPV_ARGS(PSO.GetAddressOf())));
+        ThrowIfFailed(device->CreateGraphicsPipelineState(&graphicsPipelineStateDesc, IID_PPV_ARGS(PSO.GetAddressOf())));
 
         // 12.加载待渲染数据，创建顶点缓冲
         // 使用了三角形外接圆半径的形式参数化定义
@@ -386,36 +499,82 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
        };
 
        const uint32_t vertexBufferSize = sizeof(vertices);
-       
-       CD3DX12_HEAP_PROPERTIES heapProperties(D3D12_HEAP_TYPE_UPLOAD);
 
-       D3D12_RESOURCE_DESC resourceDesc;
-       resourceDesc.Alignment = 0;
-       resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-       resourceDesc.Width = vertexBufferSize;
-       resourceDesc.Height = 1;
-       resourceDesc.MipLevels = 1;
-       resourceDesc.DepthOrArraySize = 1;
-       resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
-       resourceDesc.SampleDesc.Count = 1;
-       resourceDesc.SampleDesc.Quality = 0;
-       resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-       resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        // CD3DX12_HEAP_PROPERTIES( 
+        //     D3D12_HEAP_TYPE type, 
+        //     UINT creationNodeMask = 1, 
+        //     UINT nodeMask = 1 )
+        // {
+        //     Type = type;
+        //     CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        //     MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        //     CreationNodeMask = creationNodeMask;
+        //     VisibleNodeMask = nodeMask;
+        // }
 
-       ThrowIfFailed(device->CreateCommittedResource(
-           &heapProperties,
-           D3D12_HEAP_FLAG_NONE,
-           &resourceDesc,
-           D3D12_RESOURCE_STATE_GENERIC_READ,
-           nullptr,
-           IID_PPV_ARGS(vertexBuffer.GetAddressOf())));
+        // CD3DX12_RESOURCE_DESC( 
+        //     D3D12_RESOURCE_DIMENSION dimension,
+        //     UINT64 alignment,
+        //     UINT64 width,
+        //     UINT height,
+        //     UINT16 depthOrArraySize,
+        //     UINT16 mipLevels,
+        //     DXGI_FORMAT format,
+        //     UINT sampleCount,
+        //     UINT sampleQuality,
+        //     D3D12_TEXTURE_LAYOUT layout,
+        //     D3D12_RESOURCE_FLAGS flags )
+        // {
+        //     Dimension = dimension;
+        //     Alignment = alignment;
+        //     Width = width;
+        //     Height = height;
+        //     DepthOrArraySize = depthOrArraySize;
+        //     MipLevels = mipLevels;
+        //     Format = format;
+        //     SampleDesc.Count = sampleCount;
+        //     SampleDesc.Quality = sampleQuality;
+        //     Layout = layout;
+        //     Flags = flags;
+        // }
+
+        // CD3DX12_RESOURCE_DESC Buffer( 
+        // UINT64 width,
+        // D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE,
+        // UINT64 alignment = 0 )
+        // {
+        //     return CD3DX12_RESOURCE_DESC( D3D12_RESOURCE_DIMENSION_BUFFER, alignment, width, 1, 1, 1, 
+        //         DXGI_FORMAT_UNKNOWN, 1, 0, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, flags );
+        // }
+        D3D12_HEAP_PROPERTIES vertexBufferUploadHeapProperties = {D3D12_HEAP_TYPE_UPLOAD};
+
+        D3D12_RESOURCE_DESC vertexBufferDesc = {};
+        vertexBufferDesc.Alignment = 0;
+        vertexBufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        vertexBufferDesc.Width = vertexBufferSize;
+        vertexBufferDesc.Height = 1;
+        vertexBufferDesc.MipLevels = 1;
+        vertexBufferDesc.DepthOrArraySize = 1;
+        vertexBufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+        vertexBufferDesc.SampleDesc.Count = 1;
+        vertexBufferDesc.SampleDesc.Quality = 0;
+        vertexBufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        vertexBufferDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        ThrowIfFailed(device->CreateCommittedResource(
+            &vertexBufferUploadHeapProperties,
+            D3D12_HEAP_FLAG_NONE,
+            &vertexBufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(vertexBuffer.GetAddressOf())));
 
         byte* vertexData = nullptr;
 
         CD3DX12_RANGE readRange(0, 0);
 
         ThrowIfFailed(vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&vertexData)));
-        memcpy_s(vertexData, vertexBufferSize, vertices, vertexBufferSize);
+        memcpy_s(vertexData,vertexBufferSize, vertices, vertexBufferSize);
         vertexBuffer->Unmap(0, nullptr);
 
         D3D12_VERTEX_BUFFER_VIEW vertexBufferView = {};
@@ -423,15 +582,56 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         vertexBufferView.StrideInBytes = sizeof(Vertex);
         vertexBufferView.SizeInBytes = vertexBufferSize;
 
+        D3D12_HEAP_PROPERTIES constantBufferUploadHeapProperties = {D3D12_HEAP_TYPE_UPLOAD};
+
+        uint32_t constantBufferSize = calculateConstantBufferSize(sizeof(ObjectConstantBuffer));
+
+        D3D12_RESOURCE_DESC constantBufferDesc = {};
+        constantBufferDesc.Alignment = 0;
+        constantBufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        constantBufferDesc.Width = constantBufferSize;
+        constantBufferDesc.Height = 1;
+        constantBufferDesc.MipLevels = 1;
+        constantBufferDesc.DepthOrArraySize = 1;
+        constantBufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+        constantBufferDesc.SampleDesc.Count = 1;
+        constantBufferDesc.SampleDesc.Quality = 0;
+        constantBufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        constantBufferDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        ThrowIfFailed(device->CreateCommittedResource(
+            &constantBufferUploadHeapProperties,
+            D3D12_HEAP_FLAG_NONE,
+            &constantBufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(constantBuffer.GetAddressOf())));
+
+        byte* mappedData = nullptr;
+
+        ThrowIfFailed(constantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedData)));
+
+        CBVSRVUAVDescritproSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+        D3D12_GPU_VIRTUAL_ADDRESS constantBufferAddress = constantBuffer->GetGPUVirtualAddress();
+
+        D3D12_CONSTANT_BUFFER_VIEW_DESC constantBufferViewDesc = {};
+        constantBufferViewDesc.BufferLocation = constantBufferAddress;
+        constantBufferViewDesc.SizeInBytes = constantBufferSize;
+
+        device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
+
         // 13.创建命令分配器(ID3D12CommandAllocator)
         ThrowIfFailed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(commandAllocator.GetAddressOf())));
 
         // 14.创建命令列表(ID3D12CommandList)
         ThrowIfFailed(device->CreateCommandList(
-            0,
-            D3D12_COMMAND_LIST_TYPE_DIRECT,
-            commandAllocator.Get(),
-            PSO.Get(),
+            0, 
+            D3D12_COMMAND_LIST_TYPE_DIRECT, 
+            commandAllocator.Get(), 
+            nullptr, 
             IID_PPV_ARGS(commandList.GetAddressOf())));
 
         // 15.创建围栏(ID3D12Fence)
@@ -446,14 +646,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
             ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
         }
 
-        // 16.创建视口(D3D12_VIEWPORT)
-        CD3DX12_VIEWPORT viewport(0.0f, 0.0f,
-                                  static_cast<float>(width),
+        // 17.设置视口(D3D12_VIEWPORT)
+        CD3DX12_VIEWPORT viewport(0.0f, 0.0f, 
+                                  static_cast<float>(width), 
                                   static_cast<float>(height));
-
-        // 17.创建裁剪矩形
-        CD3DX12_RECT scissorRect(0, 0,
-                                 static_cast<long>(width),
+        // 18.设置裁剪矩形
+        CD3DX12_RECT scissorRect(0, 0, 
+                                 static_cast<long>(width), 
                                  static_cast<long>(height));
 
         LARGE_INTEGER frequency;
@@ -462,7 +661,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         LARGE_INTEGER startTime;
         LARGE_INTEGER endTime;
         LARGE_INTEGER elapsedTime;
-        float frameTime;
+
+        float frameTime = 0.0f;
+
+        ObjectConstantBuffer constantBufferData;
+
+        float rotateAngle = 0.0f;
 
         while (msg.message != WM_QUIT) {
             if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -472,20 +676,52 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
             else {
                 QueryPerformanceCounter(&startTime);
 
-                commandList->SetGraphicsRootSignature(rootSignature.Get()); 
-                commandList->RSSetViewports(1, &viewport);
-                commandList->RSSetScissorRects(1, &scissorRect);
+                XMMATRIX world =  XMMatrixRotationZ(rotateAngle);
 
-                D3D12_RESOURCE_BARRIER resourceBarrierBegin;
+                XMStoreFloat4x4(&constantBufferData.world, XMMatrixTranspose(world));
 
-                resourceBarrierBegin.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                memcpy_s(mappedData, sizeof(ObjectConstantBuffer), &constantBufferData, sizeof(ObjectConstantBuffer));
+
+                rotateAngle += frameTime;
+
+                // 通过资源屏障判定缓冲已经切换完毕可以开始渲染了
+                // CD3DX12_RESOURCE_BARRIER Transition(
+                //     _In_ ID3D12Resource* pResource,
+                //     D3D12_RESOURCE_STATES stateBefore,
+                //     D3D12_RESOURCE_STATES stateAfter,
+                //     UINT subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                //     D3D12_RESOURCE_BARRIER_FLAGS flags = D3D12_RESOURCE_BARRIER_FLAG_NONE)
+                // {
+                //     CD3DX12_RESOURCE_BARRIER result;
+                //     ZeroMemory(&result, sizeof(result));
+                //     D3D12_RESOURCE_BARRIER &barrier = result;
+                //     result.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                //     result.Flags = flags;
+                //     barrier.Transition.pResource = pResource;
+                //     barrier.Transition.StateBefore = stateBefore;
+                //     barrier.Transition.StateAfter = stateAfter;
+                //     barrier.Transition.Subresource = subresource;
+                //     return result;
+                // }
+                D3D12_RESOURCE_BARRIER resourceBarrierBegin = {};
                 resourceBarrierBegin.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                resourceBarrierBegin.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
                 resourceBarrierBegin.Transition.pResource = renderTargets[backBufferIndex].Get();
                 resourceBarrierBegin.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-                resourceBarrierBegin.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET; 
+                resourceBarrierBegin.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 resourceBarrierBegin.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
                 commandList->ResourceBarrier(1, &resourceBarrierBegin);
+
+                commandList->RSSetViewports(1, &viewport);
+                commandList->RSSetScissorRects(1, &scissorRect);
+
+                commandList->SetPipelineState(PSO.Get());
+
+                ID3D12DescriptorHeap* descriptorHeaps[] = {CBVDescriptorHeap.Get()};
+                commandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+                commandList->SetGraphicsRootSignature(rootSignature.Get());
+                commandList->SetGraphicsRootDescriptorTable(0, CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
                 CD3DX12_CPU_DESCRIPTOR_HANDLE RTVDescriptorHandle(RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
@@ -504,14 +740,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
                 commandList->DrawInstanced(3, 1, 0, 0);
 
                 // 又是一个资源屏障，用于确定渲染已经结束可以提交画面去显示了
-                D3D12_RESOURCE_BARRIER resourceBarrierEnd;
-
-                resourceBarrierEnd.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                D3D12_RESOURCE_BARRIER resourceBarrierEnd = {};
                 resourceBarrierEnd.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                resourceBarrierEnd.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
                 resourceBarrierEnd.Transition.pResource = renderTargets[backBufferIndex].Get();
                 resourceBarrierEnd.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 resourceBarrierEnd.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-                resourceBarrierEnd.Transition.pResource = renderTargets[backBufferIndex].Get();;
                 resourceBarrierEnd.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
                 commandList->ResourceBarrier(1, &resourceBarrierEnd);
@@ -532,15 +766,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
                 ThrowIfFailed(commandQueue->Signal(fence.Get(), currentFenceValue));
                 fenceValue++;
 
+                // 看命令有没有真正执行到围栏标记的位置，没有就利用事件去等待，
+                // 注意使用的是命令队列对象的指针
                 if (fence->GetCompletedValue() < currentFenceValue) {
                     ThrowIfFailed(fence->SetEventOnCompletion(currentFenceValue, fenceEvent));
                     WaitForSingleObject(fenceEvent, INFINITE);
                 }
 
+                // 到这里说明一个命令队列完整的执行完了，在这里就代表我们的
+                // 一帧已经渲染完了，接着准备执行下一帧，获得新的后备缓冲序号，
+                // 因为Present真正的完成时后备缓冲的序号就更新了
                 backBufferIndex = swapChain->GetCurrentBackBufferIndex();
 
+                // 命令分配器Reset一下
                 ThrowIfFailed(commandAllocator->Reset());
 
+                // Reset命令列表，并重新指定命令分配器和PSO对象
                 ThrowIfFailed(commandList->Reset(commandAllocator.Get(), PSO.Get()));
 
                 QueryPerformanceCounter(&endTime);
@@ -561,6 +802,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
     // 程序退出之前关闭标准输入输出
     fclose(stdin);
     fclose(stdout);
+
+    constantBuffer->Unmap(0, nullptr);
 
     return static_cast<int32_t>(msg.wParam);
 }
