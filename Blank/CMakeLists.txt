@@ -9,7 +9,14 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fp:fast")
 set(CMAKE_C_FLAGS /source-charset:utf-8)
 
 add_executable(${PROJECT_NAME} WIN32 
-    main.cpp 
+    main.cpp
+    ./imgui/imgui.cpp
+    ./imgui/imgui_draw.cpp
+    ./imgui/imgui_tables.cpp
+    ./imgui/imgui_widgets.cpp
+    ./imgui/imgui_impl_dx12.cpp
+    ./imgui/imgui_impl_win32.cpp
+    ./imgui/imgui_demo.cpp 
     )
 
 target_include_directories(${PROJECT_NAME}

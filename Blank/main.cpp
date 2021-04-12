@@ -10,6 +10,10 @@
 #include <d3d12.h>
 #include <dxcapi.h>
 
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_win32.h"
+#include "imgui/imgui_impl_dx12.h"
+
 using namespace Microsoft::WRL;
 using namespace DirectX;
 
@@ -32,7 +36,7 @@ struct Vertex {
 };
 
 struct ObjectConstantBuffer {
-    XMFLOAT4X4 world;
+    XMFLOAT4X4 worldViewProjection;
 };
 
 class DxException
@@ -177,6 +181,10 @@ uint32_t calculateConstantBufferSize(uint32_t size) {
 const wchar_t* WINDOW_CLASS_NAME = L"Game Window Class";
 const wchar_t* WINDOW_TITLE = L"DirectX 12 Sample";
 
+XMFLOAT4 cameraPosition = {0.0f, 0.0f, -50.0f, 1.0f};
+XMFLOAT4 lookAt = {0.0f, 0.0f, 0.0f, 1.0f};
+float frameTime = 0.0f;
+
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, int showCmd) {
@@ -190,7 +198,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 #if defined(DEBUG) | defined(_DEBUG)
 	_CrtSetDbgFlag( _CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF );
 #endif
-
+    
     const uint32_t backBufferCount = 3;
 
     uint32_t width = 1280;
@@ -200,6 +208,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
     uint32_t DXGIFactoryFlags = 0;
     uint32_t RTVDescriptorSize = 0;
+    uint32_t DSVDescriptorSize = 0;
     uint32_t CBVSRVUAVDescritproSize = 0;
 
     HWND hWnd = nullptr;
@@ -209,9 +218,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
     float aspectRatio = (float)width / height;
 
     DXGI_FORMAT backBufferFormt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    DXGI_FORMAT depthStencilBufferFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 
     uint64_t fenceValue = 0;
     HANDLE fenceEvent = nullptr;
+
+    uint32_t frameResourcesCount = 3;
 
     ComPtr<IDXGIFactory5>               DXGIFactory; 
     ComPtr<IDXGIAdapter1>               adapter;
@@ -219,6 +231,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
     ComPtr<IDXGISwapChain1>             temporarySwapChain;
     ComPtr<IDXGISwapChain3>             swapChain;
     ComPtr<ID3D12DescriptorHeap>        RTVDescriptorHeap;
+    ComPtr<ID3D12DescriptorHeap>        DSVDescriptorHeap;
+    ComPtr<ID3D12DescriptorHeap>        SRVDescriptorHeap;
     ComPtr<ID3D12DescriptorHeap>        CBVDescriptorHeap;
     ComPtr<ID3D12CommandQueue>          commandQueue;
     ComPtr<ID3D12CommandAllocator>      commandAllocator;
@@ -227,12 +241,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
     ComPtr<ID3D12PipelineState>         PSO;
     ComPtr<ID3D12Resource>              vertexBuffer;
     ComPtr<ID3D12Resource>              constantBuffer;
+    ComPtr<ID3D12Resource>              depthStencilBuffer;
     ComPtr<ID3D12Resource>              renderTargets[backBufferCount];
     ComPtr<ID3D12Fence>                 fence;
 
     WNDCLASSEX wcex = {};
     wcex.cbSize = sizeof(WNDCLASSEX);
-    wcex.style = CS_GLOBALCLASS;
+    wcex.style = CS_HREDRAW | CS_VREDRAW;
     wcex.lpfnWndProc = WndProc;
     wcex.cbClsExtra = 0;
     wcex.cbWndExtra = 0;
@@ -242,13 +257,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
     wcex.lpszClassName = WINDOW_CLASS_NAME;
     RegisterClassEx(&wcex);
 
+    RECT rect = { 0, 0, static_cast<long>(width), static_cast<long>(height) };
+    AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, false);
+	int clientWidth  = rect.right - rect.left;
+	int clientHeight = rect.bottom - rect.top;
+
     hWnd = CreateWindowW(WINDOW_CLASS_NAME, 
                          WINDOW_TITLE, 
                          WS_OVERLAPPED | WS_SYSMENU, 
                          CW_USEDEFAULT, 
                          0, 
-                         width, 
-                         height, 
+                         clientWidth, 
+                         clientHeight, 
                          nullptr, 
                          nullptr, 
                          hInstance, 
@@ -363,6 +383,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
         ThrowIfFailed(device->CreateDescriptorHeap(&RTVDescriptorHeapDesc, IID_PPV_ARGS(RTVDescriptorHeap.GetAddressOf())));
 
+        // 创建DSV描述符堆(ID3D12DescriptorHeap)
+        D3D12_DESCRIPTOR_HEAP_DESC DSVDescriptorHeapDesc = {};
+        DSVDescriptorHeapDesc.NumDescriptors = backBufferCount;
+        DSVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        DSVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+
+        ThrowIfFailed(device->CreateDescriptorHeap(&DSVDescriptorHeapDesc, IID_PPV_ARGS(DSVDescriptorHeap.GetAddressOf())));
+
+        // 创建SRV描述符堆(ID3D12DescriptorHeap)
+        D3D12_DESCRIPTOR_HEAP_DESC SRVDescriptorHeapDesc = {};
+        SRVDescriptorHeapDesc.NumDescriptors = 1;
+        SRVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        SRVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+        ThrowIfFailed(device->CreateDescriptorHeap(&SRVDescriptorHeapDesc, IID_PPV_ARGS(SRVDescriptorHeap.GetAddressOf())));
+
+        // 创建CBV描述符堆
         D3D12_DESCRIPTOR_HEAP_DESC CBVDescriptorHeapDesc = {};
         CBVDescriptorHeapDesc.NumDescriptors = 1;
         CBVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -382,20 +419,39 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
             RTVDescriptorHandle.Offset(1, RTVDescriptorSize);
         }
 
+        // 初始化ImGUI
+        // Setup Dear ImGui context
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO(); (void)io;
+
+        // Setup Dear ImGui style
+        ImGui::StyleColorsDark();
+
+        // Setup Platform/Renderer backends
+        ImGui_ImplWin32_Init(hWnd);
+        ImGui_ImplDX12_Init(device.Get(), backBufferCount, 
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        SRVDescriptorHeap.Get(),
+        SRVDescriptorHeap->GetCPUDescriptorHandleForHeapStart(),
+        SRVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
         // 9.创建根签名(ID3D12RootSignature)
         ComPtr<ID3DBlob> signature;
         ComPtr<ID3DBlob> error;
 
-        CD3DX12_DESCRIPTOR_RANGE1 descriptorRange;
+        CD3DX12_DESCRIPTOR_RANGE1 descriptorRange[2];
 
-        descriptorRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0);
+        descriptorRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0);
+        descriptorRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0);
 
-        CD3DX12_ROOT_PARAMETER1 rootParameter;
+        CD3DX12_ROOT_PARAMETER1 rootParameter[2];
 
-        rootParameter.InitAsDescriptorTable(1, &descriptorRange, D3D12_SHADER_VISIBILITY_VERTEX);
+        rootParameter[0].InitAsDescriptorTable(1, &descriptorRange[0], D3D12_SHADER_VISIBILITY_VERTEX);
+        rootParameter[1].InitAsDescriptorTable(1, &descriptorRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
 
         CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
-        rootSignatureDesc.Init_1_1(1, &rootParameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+        rootSignatureDesc.Init_1_1(_countof(rootParameter), rootParameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
         ThrowIfFailed(D3D12SerializeVersionedRootSignature(&rootSignatureDesc, &signature, &error));
 
@@ -478,13 +534,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         //     FrontFace = defaultStencilOp;
         //     BackFace = defaultStencilOp;
         // }
-        // graphicsPipelineStateDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-        graphicsPipelineStateDesc.DepthStencilState.DepthEnable = false;
-        graphicsPipelineStateDesc.DepthStencilState.StencilEnable = false;
+        graphicsPipelineStateDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         graphicsPipelineStateDesc.SampleMask = UINT_MAX;
         graphicsPipelineStateDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         graphicsPipelineStateDesc.NumRenderTargets = 1;
         graphicsPipelineStateDesc.RTVFormats[0] = backBufferFormt;
+        graphicsPipelineStateDesc.DSVFormat = depthStencilBufferFormat;
         graphicsPipelineStateDesc.SampleDesc.Count = 1;
         graphicsPipelineStateDesc.SampleDesc.Quality = 0;
 
@@ -493,9 +548,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         // 12.加载待渲染数据，创建顶点缓冲
         // 使用了三角形外接圆半径的形式参数化定义
         Vertex vertices[] = {
-            { { 0.0f, 0.25f * aspectRatio, 0.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
-            { { 0.25f * aspectRatio, -0.25f * aspectRatio, 0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
-            { { -0.25f * aspectRatio, -0.25f * aspectRatio, 0.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } }
+            { {  0.0f,   5.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+            { {  5.77350f, -5.77350f, 1.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+            { { -5.77350f, -5.77350f, 1.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } }
        };
 
        const uint32_t vertexBufferSize = sizeof(vertices);
@@ -655,6 +710,44 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
                                  static_cast<long>(width), 
                                  static_cast<long>(height));
 
+        D3D12_RESOURCE_DESC depthStencilDesc = {};
+
+        depthStencilDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        depthStencilDesc.Alignment = 0;
+        depthStencilDesc.Width = width;
+        depthStencilDesc.Height = height;
+        depthStencilDesc.DepthOrArraySize = 1;
+        depthStencilDesc.MipLevels = 1;
+        depthStencilDesc.Format = depthStencilBufferFormat;
+        depthStencilDesc.SampleDesc.Count = 1;
+        depthStencilDesc.SampleDesc.Quality = 0;
+        depthStencilDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        depthStencilDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+        D3D12_CLEAR_VALUE clearValue;
+
+        clearValue.Format = depthStencilBufferFormat;
+        clearValue.DepthStencil.Depth = 1.0f;
+        clearValue.DepthStencil.Stencil = 0;
+
+        ThrowIfFailed(device->CreateCommittedResource(
+            &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+            D3D12_HEAP_FLAG_NONE,
+            &depthStencilDesc,
+            D3D12_RESOURCE_STATE_COMMON,
+            &clearValue,
+            IID_PPV_ARGS(depthStencilBuffer.GetAddressOf())));
+
+        device->CreateDepthStencilView(depthStencilBuffer.Get(), nullptr, DSVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+        // 将资源从初始状态转换为深度缓冲区
+        commandList->ResourceBarrier(
+            1, 
+            &CD3DX12_RESOURCE_BARRIER::Transition(
+                depthStencilBuffer.Get(),
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_DEPTH_WRITE));
+
         LARGE_INTEGER frequency;
         QueryPerformanceFrequency(&frequency);
 
@@ -662,11 +755,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         LARGE_INTEGER endTime;
         LARGE_INTEGER elapsedTime;
 
-        float frameTime = 0.0f;
-
         ObjectConstantBuffer constantBufferData;
 
         float rotateAngle = 0.0f;
+
+        bool showDemoWindow = true;
+        bool showAnotherWindow = false;
+        bool showMainWindow = true;
+
+        ImVec4 clearColor = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
         while (msg.message != WM_QUIT) {
             if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -676,13 +773,111 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
             else {
                 QueryPerformanceCounter(&startTime);
 
-                XMMATRIX world =  XMMatrixRotationZ(rotateAngle);
+                XMMATRIX world =  XMMatrixIdentity();// XMMatrixRotationZ(rotateAngle);
 
-                XMStoreFloat4x4(&constantBufferData.world, XMMatrixTranspose(world));
+                XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+                XMVECTOR eye = XMLoadFloat4(&cameraPosition);
+                XMVECTOR target = XMLoadFloat4(&lookAt);
+
+                XMVECTOR forward = XMVectorSubtract(target, eye);
+                forward = XMVector3Normalize(forward);
+
+                XMVECTOR right = XMVector3Cross(up, forward);
+                right = XMVector3Normalize(right);
+
+                up = XMVector3Cross(forward, right);
+
+                XMMATRIX view = XMMatrixIdentity();
+
+                XMFLOAT4 tempRight;
+                XMStoreFloat4(&tempRight, right);
+                
+                XMFLOAT4 tempUp;
+                XMStoreFloat4(&tempUp, up);
+
+                XMFLOAT4 tempForward;
+                XMStoreFloat4(&tempForward, forward);
+
+                view.r[0] = XMVectorSet(tempRight.x, tempUp.x, tempForward.x, 0.0f);
+                view.r[1] = XMVectorSet(tempRight.y, tempUp.y, tempForward.y, 0.0f);
+                view.r[2] = XMVectorSet(tempRight.z, tempUp.z, tempForward.z, 0.0f);
+                
+                float tx = -XMVectorGetX(XMVector3Dot(eye, right));
+                float ty = -XMVectorGetY(XMVector3Dot(eye, up));
+                float tz = -XMVectorGetZ(XMVector3Dot(eye, forward));
+
+                view.r[3] = XMVectorSet(tx, ty, tz, 1.0f);
+
+                float fov = XM_PIDIV4;
+                float halfTanFov = tanf(fov / 2);
+                float nearZ = 1.0f;
+                float farZ = 1000.0f;
+                float aspect = static_cast<float>(width) / height;
+
+                XMMATRIX projection;
+
+                projection.r[0] = XMVectorSet(1.0f / (aspect * halfTanFov), 0.0f,  0.0f, 0.0f);
+                projection.r[1] = XMVectorSet(0.0f, 1.0f / halfTanFov, 0.0f, 0.0f);
+                projection.r[2] = XMVectorSet(0.0f, 0.0f, farZ / (farZ - nearZ), 1.0f);
+                projection.r[3] = XMVectorSet(0.0f, 0.0f, -farZ * nearZ / (farZ - nearZ), 0.0f);
+
+                XMMATRIX worldViewProjection = world * view * projection;
+
+                XMStoreFloat4x4(&constantBufferData.worldViewProjection, XMMatrixTranspose(worldViewProjection));
 
                 memcpy_s(mappedData, sizeof(ObjectConstantBuffer), &constantBufferData, sizeof(ObjectConstantBuffer));
 
                 rotateAngle += frameTime;
+
+                // Start the Dear ImGui frame
+                ImGui_ImplDX12_NewFrame();
+                ImGui_ImplWin32_NewFrame();
+                ImGui::NewFrame();
+
+                // 构建imgui窗体
+                // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
+                if (showDemoWindow)
+                    ImGui::ShowDemoWindow(&showDemoWindow);
+
+                // 2. Show a simple window that we create ourselves. We use a Begin/End pair to created a named window.
+                {
+                    static float f = 0.0f;
+                    static int counter = 0;
+
+                    if (showMainWindow)
+                    {
+                        if (!ImGui::Begin("Hello, world!", &showMainWindow)) { // Create a window called "Hello, world!" and append into it.
+                            // Early out if the window is collapsed, as an optimization.
+                            ImGui::End();
+                        }
+                        else {
+                            ImGui::Text("This is some useful text.");             // Display some text (you can use a format strings too)
+                            ImGui::Checkbox("Demo Window", &showDemoWindow);      // Edit bools storing our window open/close state
+                            ImGui::Checkbox("Another Window", &showAnotherWindow);
+
+                            ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
+                            ImGui::ColorEdit3("clear color", (float*)&clearColor); // Edit 3 floats representing a color
+
+                            if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
+                                counter++;
+                            ImGui::SameLine();
+                            ImGui::Text("counter = %d", counter);
+
+                            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+                            ImGui::End();
+                        }
+                    }
+                }
+
+                // 3. Show another simple window.
+                if (showAnotherWindow)
+                {
+                    ImGui::Begin("Another Window", &showAnotherWindow);   // Pass a pointer to our bool variable (the window will have a closing button that will clear the bool when clicked)
+                    ImGui::Text("Hello from another window!");
+                    if (ImGui::Button("Close Me"))
+                        showAnotherWindow = false;
+                    ImGui::End();
+                }
 
                 // 通过资源屏障判定缓冲已经切换完毕可以开始渲染了
                 // CD3DX12_RESOURCE_BARRIER Transition(
@@ -727,17 +922,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
                 RTVDescriptorHandle.Offset(backBufferIndex, RTVDescriptorSize);
 
+                CD3DX12_CPU_DESCRIPTOR_HANDLE DSVDescriptorHandle(DSVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
                 // 设置渲染目标
-                commandList->OMSetRenderTargets(1, &RTVDescriptorHandle, false, nullptr);
+                commandList->OMSetRenderTargets(1, &RTVDescriptorHandle, false, &DSVDescriptorHandle);
 
                 // 继续记录命令，并真正开始新一帧的渲染
                 const float clearColor[] = {0.4f, 0.6f, 0.9f, 1.0f};
 
                 commandList->ClearRenderTargetView(RTVDescriptorHandle, clearColor, 0, nullptr);
+                commandList->ClearDepthStencilView(DSVDescriptorHandle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+
                 commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                 commandList->IASetVertexBuffers(0, 1, &vertexBufferView);
 
-                commandList->DrawInstanced(3, 1, 0, 0);
+                // commandList->DrawInstanced(3, 1, 0, 0);
+
+                commandList->SetDescriptorHeaps(1, SRVDescriptorHeap.GetAddressOf());
+
+                commandList->SetGraphicsRootDescriptorTable(1, SRVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+                ImGui::Render();
+	            ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList.Get());
 
                 // 又是一个资源屏障，用于确定渲染已经结束可以提交画面去显示了
                 D3D12_RESOURCE_BARRIER resourceBarrierEnd = {};
@@ -758,7 +964,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
                 commandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
 
                 // 提交画面
-                ThrowIfFailed(swapChain->Present(1, 0));
+                ThrowIfFailed(swapChain->Present(1, 0));    // Present with vsync
 
                 uint64_t currentFenceValue = fenceValue;
 
@@ -805,15 +1011,77 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
     constantBuffer->Unmap(0, nullptr);
 
+    ImGui_ImplDX12_Shutdown();
+	ImGui_ImplWin32_Shutdown();
+	ImGui::DestroyContext();
+
     return static_cast<int32_t>(msg.wParam);
 }
 
+float moveSpeed = 50.0f;
+
+// Forward declare message handler from imgui_impl_win32.cpp
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+	if (ImGui_ImplWin32_WndProcHandler(hWnd, message, wParam, lParam))
+	{
+		return true;
+	}
+	
+	if (ImGui::GetCurrentContext() != nullptr && ImGui::GetIO().WantCaptureMouse)
+	{
+		return true;
+	}
+
 	switch (message)
 	{
 	case WM_DESTROY:
 		PostQuitMessage(0);
 		break;
+
+    case WM_KEYDOWN:
+        switch (wParam) {
+        case VK_ESCAPE:
+            DestroyWindow(hWnd);
+            break;
+        
+        default:
+            break;
+        }
+
+        break;
+
+    case WM_CHAR:
+
+    switch (wParam)
+    {
+    case 'W':
+    case 'w':
+        cameraPosition.z += moveSpeed * frameTime;
+        break;
+
+    case 'S':
+    case 's':
+        cameraPosition.z -= moveSpeed * frameTime;
+        break;
+
+    case 'A':
+    case 'a':
+        cameraPosition.x -= moveSpeed * frameTime;
+        lookAt.x -= moveSpeed * frameTime;
+        break;
+
+    case 'D':
+    case 'd':
+        cameraPosition.x += moveSpeed * frameTime;
+        lookAt.x += moveSpeed * frameTime;
+        break;
+    
+    default:
+        break;
+    }
+
 	default:
 		return DefWindowProc(hWnd, message, wParam, lParam);
 	}
