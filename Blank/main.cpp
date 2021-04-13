@@ -4,6 +4,7 @@
 #include <string>
 #include <comdef.h>
 #include <fstream>
+#include <vector>
 
 #include <dxgi1_6.h>
 #include <DirectXMath.h>
@@ -14,12 +15,20 @@
 #include "imgui/imgui_impl_win32.h"
 #include "imgui/imgui_impl_dx12.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "Common/stb_image.h"
+#include "Common/lodepng.h"
+
 using namespace Microsoft::WRL;
 using namespace DirectX;
 
 #if defined(_DEBUG)
 #include <dxgidebug.h>
+#define DX12_ENABLE_DEBUG_LAYER
 #endif
+
+#define KEYDOWN(keyCode) ((GetAsyncKeyState(keyCode) & 0x8000) ? 1 : 0) 
+#define KEYUP(keyCode) ((GetAsyncKeyState(keyCode) & 0x8000) ? 0 : 1)
 
 #include "Common/d3dx12.h"
 
@@ -33,6 +42,7 @@ inline std::wstring AnsiToWString(const std::string& str)
 struct Vertex {
     XMFLOAT3 position;
     XMFLOAT4 color;
+    XMFLOAT2 uv;
 };
 
 struct ObjectConstantBuffer {
@@ -174,8 +184,51 @@ std::string loadShader(const std::string& binaryName) {
     return shaderData;
 }
 
+void saveImage(const std::string& path, byte* pixels, uint32_t width, uint32_t height) {
+	std::vector<unsigned char> pixelBuffer;
+
+	int pixelCount = width * height;
+
+	byte* src = pixels;
+
+	// for (int i = 0; i < pixelCount; i++) {
+	// 	// pixelBuffer.push_back((unsigned char)pixelPtr[i * 4]);
+	// 	// pixelBuffer.push_back((unsigned char)pixelPtr[i * 4 + 1]);
+	// 	// pixelBuffer.push_back((unsigned char)pixelPtr[i * 4 + 2]);
+	// 	// pixelBuffer.push_back((unsigned char)pixelPtr[i * 4 + 3]);
+	// 	pixelBuffer.push_back((unsigned char)pixelPtr[0]);
+	// 	pixelBuffer.push_back((unsigned char)pixelPtr[1]);
+	// 	pixelBuffer.push_back((unsigned char)pixelPtr[2]);
+	// 	pixelBuffer.push_back((unsigned char)pixelPtr[3]);
+	// 	pixelPtr += 4;
+	// }
+
+    for (uint32_t h = 0; h < height; h++) {
+        for (uint32_t w = 0; w < width; w++) {
+            pixelBuffer.push_back(*src++);
+            pixelBuffer.push_back(*src++);
+            pixelBuffer.push_back(*src++);
+            pixelBuffer.push_back(*src++);
+        }
+    }
+
+	//Encode the image
+	unsigned error = lodepng::encode(path, pixelBuffer, width, height);
+
+	pixelBuffer.clear();
+}
+
 uint32_t calculateConstantBufferSize(uint32_t size) {
     return (size + 255) & (~255);
+}
+
+uint64_t align(uint64_t size, uint64_t alignment) {
+    return (size + alignment - 1) & (~(alignment - 1));
+}
+
+void executeCommandList(const ComPtr<ID3D12CommandQueue>& commandQueue, const ComPtr<ID3D12CommandList>& commandList) {
+    ID3D12CommandList* commandLists[] = {commandList.Get()};
+    commandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
 }
 
 const wchar_t* WINDOW_CLASS_NAME = L"Game Window Class";
@@ -184,6 +237,33 @@ const wchar_t* WINDOW_TITLE = L"DirectX 12 Sample";
 XMFLOAT4 cameraPosition = {0.0f, 0.0f, -50.0f, 1.0f};
 XMFLOAT4 lookAt = {0.0f, 0.0f, 0.0f, 1.0f};
 float frameTime = 0.0f;
+bool windowActive = true;
+
+void fill8bit(byte* dest, const byte* src, uint32_t width, uint32_t height, uint32_t padding) {
+    for (uint32_t h = 0; h < width; h++) {
+        for (uint32_t w = 0; w < height; w++) {
+            *dest++ = *src;
+            *dest++ = *src;
+            *dest++ = *src++;
+            *dest++ = 255;
+        }
+
+        dest += padding;
+    }
+}
+
+void fill24Bit(byte* dest, const byte* src, uint32_t width, uint32_t height, uint32_t padding) {
+    for (uint32_t h = 0; h < width; h++) {
+        for (uint32_t w = 0; w < height; w++) {
+            *dest++ = *src++;
+            *dest++ = *src++;
+            *dest++ = *src++;
+            *dest++ = 255;
+        }
+
+        dest += padding;
+    }
+}
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 
@@ -234,12 +314,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
     ComPtr<ID3D12DescriptorHeap>        DSVDescriptorHeap;
     ComPtr<ID3D12DescriptorHeap>        SRVDescriptorHeap;
     ComPtr<ID3D12DescriptorHeap>        CBVDescriptorHeap;
+    ComPtr<ID3D12DescriptorHeap>        samplerDescriptorHeap;
     ComPtr<ID3D12CommandQueue>          commandQueue;
     ComPtr<ID3D12CommandAllocator>      commandAllocator;
     ComPtr<ID3D12GraphicsCommandList>   commandList;
     ComPtr<ID3D12RootSignature>         rootSignature;
     ComPtr<ID3D12PipelineState>         PSO;
     ComPtr<ID3D12Resource>              vertexBuffer;
+    ComPtr<ID3D12Resource>              indexBuffer;
     ComPtr<ID3D12Resource>              constantBuffer;
     ComPtr<ID3D12Resource>              depthStencilBuffer;
     ComPtr<ID3D12Resource>              renderTargets[backBufferCount];
@@ -284,16 +366,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
     try {
 
-        #if defined(_DEBUG)
-                {   //打开显示子系统的调试支持
-                    ComPtr<ID3D12Debug> debugController;
-                    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
-                    {
-                        debugController->EnableDebugLayer();
-                        // 打开附加的调试支持
-                        DXGIFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
-                    }
-                }
+        #ifdef DX12_ENABLE_DEBUG_LAYER
+            //打开显示子系统的调试支持
+            ComPtr<ID3D12Debug> debugController;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
+            {
+                debugController->EnableDebugLayer();
+                // 打开附加的调试支持
+                DXGIFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+            }
         #endif
 
         // 1.创建IDXGIFactory
@@ -325,6 +406,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
         // 4.实际进行设备创建(ID3D12Device)
         ThrowIfFailed(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(device.GetAddressOf())));
+
+        #ifdef DX12_ENABLE_DEBUG_LAYER
+            if (debugController != nullptr)
+            {
+                ID3D12InfoQueue* pInfoQueue = nullptr;
+                device->QueryInterface(IID_PPV_ARGS(&pInfoQueue));
+                pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
+                pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
+                pInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, true);
+                pInfoQueue->Release();
+            }
+        #endif
 
         // 5.创建命令队列(ID3D12CommandQueue)
         // struct D3D12_COMMAND_QUEUE_DESC
@@ -399,9 +492,34 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
         ThrowIfFailed(device->CreateDescriptorHeap(&SRVDescriptorHeapDesc, IID_PPV_ARGS(SRVDescriptorHeap.GetAddressOf())));
 
+        // 创建Sampler描述符堆
+        D3D12_DESCRIPTOR_HEAP_DESC samplerDescriptorHeapDesc = {};
+        samplerDescriptorHeapDesc.NumDescriptors = 1;
+        samplerDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+        samplerDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+        ThrowIfFailed(device->CreateDescriptorHeap(&samplerDescriptorHeapDesc, IID_PPV_ARGS(samplerDescriptorHeap.GetAddressOf())));
+
+        D3D12_SAMPLER_DESC samplerDesc = {};
+        samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        samplerDesc.MipLODBias = 0;
+        samplerDesc.MaxAnisotropy = 0;
+        samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        samplerDesc.BorderColor[0] = 0.0f;
+        samplerDesc.BorderColor[1] = 0.0f;
+        samplerDesc.BorderColor[2] = 0.0f;
+        samplerDesc.BorderColor[3] = 0.0f;
+        samplerDesc.MinLOD = 0.0f;
+        samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+
+        device->CreateSampler(&samplerDesc, samplerDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
         // 创建CBV描述符堆
         D3D12_DESCRIPTOR_HEAP_DESC CBVDescriptorHeapDesc = {};
-        CBVDescriptorHeapDesc.NumDescriptors = 1;
+        CBVDescriptorHeapDesc.NumDescriptors = 2;
         CBVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         CBVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
@@ -411,12 +529,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         // 获取RTV描述符大小
         RTVDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-        CD3DX12_CPU_DESCRIPTOR_HANDLE RTVDescriptorHandle(RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+        CD3DX12_CPU_DESCRIPTOR_HANDLE RTVCPUDescriptorHandle(RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
         for (uint32_t backBufferIndex = 0; backBufferIndex < backBufferCount; backBufferIndex++) {
             ThrowIfFailed(swapChain->GetBuffer(backBufferIndex, IID_PPV_ARGS(renderTargets[backBufferIndex].GetAddressOf())));
-            device->CreateRenderTargetView(renderTargets[backBufferIndex].Get(), nullptr, RTVDescriptorHandle);
-            RTVDescriptorHandle.Offset(1, RTVDescriptorSize);
+            device->CreateRenderTargetView(renderTargets[backBufferIndex].Get(), nullptr, RTVCPUDescriptorHandle);
+            RTVCPUDescriptorHandle.Offset(1, RTVDescriptorSize);
         }
 
         // 初始化ImGUI
@@ -440,15 +558,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         ComPtr<ID3DBlob> signature;
         ComPtr<ID3DBlob> error;
 
-        CD3DX12_DESCRIPTOR_RANGE1 descriptorRange[2];
+        CD3DX12_DESCRIPTOR_RANGE1 descriptorRange[4];
 
         descriptorRange[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0);
         descriptorRange[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0);
+        descriptorRange[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 0);
+        descriptorRange[3].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0);
 
-        CD3DX12_ROOT_PARAMETER1 rootParameter[2];
+        CD3DX12_ROOT_PARAMETER1 rootParameter[4];
 
         rootParameter[0].InitAsDescriptorTable(1, &descriptorRange[0], D3D12_SHADER_VISIBILITY_VERTEX);
         rootParameter[1].InitAsDescriptorTable(1, &descriptorRange[1], D3D12_SHADER_VISIBILITY_PIXEL);
+        rootParameter[2].InitAsDescriptorTable(1, &descriptorRange[2], D3D12_SHADER_VISIBILITY_PIXEL);
+        rootParameter[3].InitAsDescriptorTable(1, &descriptorRange[3], D3D12_SHADER_VISIBILITY_PIXEL);
 
         CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
         rootSignatureDesc.Init_1_1(_countof(rootParameter), rootParameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
@@ -479,12 +601,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         // }; 
         D3D12_INPUT_ELEMENT_DESC inputElementDesc[] = {
             {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-            {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}
+            {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}
         };
 
-        D3D12_INPUT_LAYOUT_DESC inputLayout = {inputElementDesc, _countof(inputElementDesc)};
-
         // 11.创建渲染管线状态对象(ID3D12PipelineStateObject)
+        D3D12_INPUT_LAYOUT_DESC inputLayout = {inputElementDesc, _countof(inputElementDesc)};
         D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicsPipelineStateDesc = {};
         graphicsPipelineStateDesc.InputLayout = inputLayout;
         graphicsPipelineStateDesc.pRootSignature = rootSignature.Get();
@@ -547,13 +669,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
         // 12.加载待渲染数据，创建顶点缓冲
         // 使用了三角形外接圆半径的形式参数化定义
-        Vertex vertices[] = {
-            { {  0.0f,   5.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
-            { {  5.77350f, -5.77350f, 1.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
-            { { -5.77350f, -5.77350f, 1.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } }
+        std::vector<Vertex> vertices = {
+            { { -5.0f,  5.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f }, {0.0f, 0.0f} },
+            { {  5.0f,  5.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 1.0f }, {1.0f, 0.0f} },
+            { {  5.0f, -5.0f, 1.0f }, { 0.0f, 0.0f, 1.0f, 1.0f }, {1.0f, 1.0f} },
+            { { -5.0f, -5.0f, 1.0f }, { 1.0f, 1.0f, 0.0f, 1.0f }, {0.0f, 1.0f} }
        };
 
-       const uint32_t vertexBufferSize = sizeof(vertices);
+       const uint32_t vertexBufferSize = sizeof(Vertex) * static_cast<uint32_t>(vertices.size());
 
         // CD3DX12_HEAP_PROPERTIES( 
         //     D3D12_HEAP_TYPE type, 
@@ -629,13 +752,55 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         CD3DX12_RANGE readRange(0, 0);
 
         ThrowIfFailed(vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&vertexData)));
-        memcpy_s(vertexData,vertexBufferSize, vertices, vertexBufferSize);
+        memcpy_s(vertexData,vertexBufferSize, vertices.data(), vertexBufferSize);
         vertexBuffer->Unmap(0, nullptr);
 
+        // 创建顶点缓冲视图
         D3D12_VERTEX_BUFFER_VIEW vertexBufferView = {};
         vertexBufferView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();
         vertexBufferView.StrideInBytes = sizeof(Vertex);
         vertexBufferView.SizeInBytes = vertexBufferSize;
+
+        std::vector<uint32_t> indices = {
+            0, 1, 2,
+            2, 3, 0
+        };
+
+        uint32_t indexBufferSize = sizeof(uint32_t) * static_cast<uint32_t>(indices.size());
+
+        D3D12_HEAP_PROPERTIES indexBufferUploadHeapProperties = {D3D12_HEAP_TYPE_UPLOAD};
+
+        D3D12_RESOURCE_DESC indexBufferDesc = {};
+        indexBufferDesc.Alignment = 0;
+        indexBufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        indexBufferDesc.Width = indexBufferSize;
+        indexBufferDesc.Height = 1;
+        indexBufferDesc.MipLevels = 1;
+        indexBufferDesc.DepthOrArraySize = 1;
+        indexBufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+        indexBufferDesc.SampleDesc.Count = 1;
+        indexBufferDesc.SampleDesc.Quality = 0;
+        indexBufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        indexBufferDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        ThrowIfFailed(device->CreateCommittedResource(
+            &indexBufferUploadHeapProperties,
+            D3D12_HEAP_FLAG_NONE,
+            &indexBufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(indexBuffer.GetAddressOf())));
+
+        uint32_t* indexData = nullptr;
+
+        ThrowIfFailed(indexBuffer->Map(0, nullptr, reinterpret_cast<void**>(&indexData)));
+        memcpy_s(indexData, indexBufferSize, indices.data(), indexBufferSize);
+        indexBuffer->Unmap(0, nullptr);
+
+        D3D12_INDEX_BUFFER_VIEW indexBufferView = {};
+        indexBufferView.Format = DXGI_FORMAT_R32_UINT;
+        indexBufferView.BufferLocation = indexBuffer->GetGPUVirtualAddress();
+        indexBufferView.SizeInBytes = indexBufferSize;
 
         D3D12_HEAP_PROPERTIES constantBufferUploadHeapProperties = {D3D12_HEAP_TYPE_UPLOAD};
 
@@ -662,13 +827,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
             nullptr,
             IID_PPV_ARGS(constantBuffer.GetAddressOf())));
 
-        byte* mappedData = nullptr;
+        byte* mappedConstantBufferData = nullptr;
 
-        ThrowIfFailed(constantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedData)));
+        ThrowIfFailed(constantBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedConstantBufferData)));
 
         CBVSRVUAVDescritproSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-        CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+        CD3DX12_CPU_DESCRIPTOR_HANDLE CBVCPUDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
         D3D12_GPU_VIRTUAL_ADDRESS constantBufferAddress = constantBuffer->GetGPUVirtualAddress();
 
@@ -676,7 +841,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
         constantBufferViewDesc.BufferLocation = constantBufferAddress;
         constantBufferViewDesc.SizeInBytes = constantBufferSize;
 
-        device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
+        device->CreateConstantBufferView(&constantBufferViewDesc, CBVCPUDescriptorHandle);
 
         // 13.创建命令分配器(ID3D12CommandAllocator)
         ThrowIfFailed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(commandAllocator.GetAddressOf())));
@@ -748,6 +913,163 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
                 D3D12_RESOURCE_STATE_COMMON,
                 D3D12_RESOURCE_STATE_DEPTH_WRITE));
 
+        int32_t imageWidth = 0;
+        int32_t imageHeight = 0;
+        int32_t channels = 0;
+
+        byte* imageData = stbi_load("Textures/Kanna.jpg", &imageWidth, &imageHeight, &channels, 0);
+
+        ComPtr<ID3D12Resource> texture;
+
+        D3D12_RESOURCE_DESC textureDesc = {};
+        textureDesc.Alignment = 0;
+        textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        textureDesc.Width = imageWidth;
+        textureDesc.Height = imageHeight;
+        textureDesc.MipLevels = 1;
+        textureDesc.DepthOrArraySize = 1;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.SampleDesc.Quality = 0;
+        textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        ThrowIfFailed(device->CreateCommittedResource(
+            &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+            D3D12_HEAP_FLAG_NONE,
+            &textureDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(texture.GetAddressOf())));
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
+        SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        SRVDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        SRVDesc.Texture2D.MipLevels = 1;
+
+        CBVCPUDescriptorHandle.Offset(1, CBVSRVUAVDescritproSize);
+
+        device->CreateShaderResourceView(texture.Get(), &SRVDesc, CBVCPUDescriptorHandle);
+        
+        uint64_t textureUploadBufferSize = GetRequiredIntermediateSize(texture.Get(), 0, 1);
+
+        ComPtr<ID3D12Resource> textureUploadBuffer = nullptr;
+
+        D3D12_RESOURCE_DESC textureUploadBufferDesc = {};
+        textureUploadBufferDesc.Alignment = 0;
+        textureUploadBufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        textureUploadBufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+        textureUploadBufferDesc.Width = textureUploadBufferSize;
+        textureUploadBufferDesc.Height = 1;
+        textureUploadBufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        textureUploadBufferDesc.MipLevels = 1;
+        textureUploadBufferDesc.DepthOrArraySize = 1;
+        textureUploadBufferDesc.SampleDesc.Count = 1;
+        textureUploadBufferDesc.SampleDesc.Quality = 0;
+        textureUploadBufferDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        ThrowIfFailed(device->CreateCommittedResource(
+            &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+            D3D12_HEAP_FLAG_NONE,
+            &textureUploadBufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(textureUploadBuffer.GetAddressOf())));
+
+        uint64_t requiredSize = 0;
+        uint32_t numSubresources = 1;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT textureLayout = {};
+        uint64_t textureRowSize = 0;
+        uint32_t textureRowNum = 0;
+
+        device->GetCopyableFootprints(
+            &textureDesc,
+            0,
+            numSubresources,
+            0,
+            &textureLayout,
+            &textureRowNum,
+            &textureRowSize,
+            &requiredSize);
+        
+        byte* mappedTextureUploadBufferData = nullptr;
+
+        uint32_t rowPitch = textureLayout.Footprint.RowPitch;
+        uint32_t bufferSize = imageHeight * rowPitch;
+        
+        uint32_t bitPerComponent = 4;
+
+        // 每行需要填充的对齐字节数
+        uint32_t padding = rowPitch - imageWidth * bitPerComponent;
+
+        byte* convertedImageData = new byte[requiredSize];
+
+        const byte* src = imageData;
+        byte* dest = convertedImageData;
+
+        // 按照位深进行字节填充(将8位，24位像素格式填充到32位，并将行对齐到256字节)
+        if (channels == 1) {
+            fill8bit(dest, src, imageWidth, imageHeight, padding);
+        }
+        else if (channels == 3) {
+            fill24Bit(dest, src, imageWidth, imageHeight, padding);
+        }
+
+        delete imageData;
+
+        ThrowIfFailed(textureUploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedTextureUploadBufferData)));
+
+        byte* destSlice = reinterpret_cast<byte*>(mappedTextureUploadBufferData) + textureLayout.Offset;
+        byte* srcSlice = convertedImageData;
+
+        for (uint32_t row = 0; row < textureRowNum; row++) {
+            memcpy_s(destSlice + static_cast<size_t>(textureLayout.Footprint.RowPitch) * row, textureLayout.Footprint.RowPitch,
+                     srcSlice + static_cast<size_t>(rowPitch) * row, rowPitch);
+        }
+
+        // saveImage("test.png", mappedTextureUploadBufferData, 704, 700);
+
+        delete convertedImageData;
+
+        textureUploadBuffer->Unmap(0, nullptr);
+
+        CD3DX12_TEXTURE_COPY_LOCATION destLocation(texture.Get(), 0);
+        CD3DX12_TEXTURE_COPY_LOCATION srcLocation(textureUploadBuffer.Get(), textureLayout);
+
+        commandList->CopyTextureRegion(&destLocation, 0, 0, 0, &srcLocation, nullptr);
+
+        D3D12_RESOURCE_BARRIER resourceBarrier = {};
+        resourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        resourceBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        resourceBarrier.Transition.pResource = texture.Get();
+        resourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        resourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        commandList->ResourceBarrier(1, &resourceBarrier);
+
+        ThrowIfFailed(commandList->Close());
+
+        executeCommandList(commandQueue, commandList);
+
+        uint64_t currentFenceValue = fenceValue;
+
+        // 开始同步GPU与CPU执行，先记录围栏标记值
+        ThrowIfFailed(commandQueue->Signal(fence.Get(), currentFenceValue));
+        fenceValue++;
+
+        // 看命令有没有真正执行到围栏标记的位置，没有就利用事件去等待，
+        // 注意使用的是命令队列对象的指针
+        if (fence->GetCompletedValue() < currentFenceValue) {
+            ThrowIfFailed(fence->SetEventOnCompletion(currentFenceValue, fenceEvent));
+            WaitForSingleObject(fenceEvent, INFINITE);
+        }
+
+        // 命令分配器Reset一下
+        ThrowIfFailed(commandAllocator->Reset());
+
+        // Reset命令列表，并重新指定命令分配器和PSO对象
+        ThrowIfFailed(commandList->Reset(commandAllocator.Get(), PSO.Get()));
+
         LARGE_INTEGER frequency;
         QueryPerformanceFrequency(&frequency);
 
@@ -773,7 +1095,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
             else {
                 QueryPerformanceCounter(&startTime);
 
-                XMMATRIX world =  XMMatrixIdentity();// XMMatrixRotationZ(rotateAngle);
+                // 窗口失去焦点时不要处理按键事件
+                if (windowActive) {
+                    if (KEYDOWN('A')) {
+                        cameraPosition.x -= 10.0f * frameTime;
+                        lookAt.x -= 10.0f * frameTime;
+                    }
+                    
+                    if (KEYDOWN('D')) {
+                        cameraPosition.x += 10.0f * frameTime;
+                        lookAt.x += 10.0f * frameTime;
+                    }
+
+                    if (KEYDOWN('W')) {
+                        cameraPosition.z += 10.0f * frameTime;
+                    }
+
+                    if (KEYDOWN('S')) {
+                        cameraPosition.z -= 10.0f * frameTime;
+                    }
+                }
+
+                XMMATRIX world =  XMMatrixIdentity();
 
                 XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
                 XMVECTOR eye = XMLoadFloat4(&cameraPosition);
@@ -825,7 +1168,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
                 XMStoreFloat4x4(&constantBufferData.worldViewProjection, XMMatrixTranspose(worldViewProjection));
 
-                memcpy_s(mappedData, sizeof(ObjectConstantBuffer), &constantBufferData, sizeof(ObjectConstantBuffer));
+                memcpy_s(mappedConstantBufferData, sizeof(ObjectConstantBuffer), &constantBufferData, sizeof(ObjectConstantBuffer));
 
                 rotateAngle += frameTime;
 
@@ -913,10 +1256,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
                 commandList->SetPipelineState(PSO.Get());
 
-                ID3D12DescriptorHeap* descriptorHeaps[] = {CBVDescriptorHeap.Get()};
+                ID3D12DescriptorHeap* descriptorHeaps[] = {CBVDescriptorHeap.Get(), samplerDescriptorHeap.Get()};
                 commandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
                 commandList->SetGraphicsRootSignature(rootSignature.Get());
-                commandList->SetGraphicsRootDescriptorTable(0, CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+                CD3DX12_GPU_DESCRIPTOR_HANDLE CBVGPUDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+                commandList->SetGraphicsRootDescriptorTable(0, CBVGPUDescriptorHandle);
+
+                CBVGPUDescriptorHandle.Offset(1, CBVSRVUAVDescritproSize);
+
+                commandList->SetGraphicsRootDescriptorTable(2, CBVGPUDescriptorHandle);
+                commandList->SetGraphicsRootDescriptorTable(3, samplerDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
                 CD3DX12_CPU_DESCRIPTOR_HANDLE RTVDescriptorHandle(RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
@@ -935,8 +1286,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 
                 commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                 commandList->IASetVertexBuffers(0, 1, &vertexBufferView);
+                commandList->IASetIndexBuffer(&indexBufferView);
 
-                // commandList->DrawInstanced(3, 1, 0, 0);
+                uint32_t indexCount = static_cast<uint32_t>(indices.size());
+                uint32_t instanceCount = indexCount / 3;
+
+                commandList->DrawIndexedInstanced(indexCount, instanceCount, 0, 0, 0);
 
                 commandList->SetDescriptorHeaps(1, SRVDescriptorHeap.GetAddressOf());
 
@@ -960,11 +1315,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
                 ThrowIfFailed(commandList->Close());
 
                 // 执行命令列表
-                ID3D12CommandList* commandLists[] = {commandList.Get()};
-                commandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
+                executeCommandList(commandQueue, commandList);
 
                 // 提交画面
                 ThrowIfFailed(swapChain->Present(1, 0));    // Present with vsync
+                // ThrowIfFailed(swapChain->Present(0, 0));    // Present without vsync
 
                 uint64_t currentFenceValue = fenceValue;
 
@@ -995,7 +1350,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
                 elapsedTime.QuadPart = endTime.QuadPart - startTime.QuadPart;
                 elapsedTime.QuadPart *= 1000000;
                 elapsedTime.QuadPart /= frequency.QuadPart;
-                frameTime = static_cast<float>(elapsedTime.QuadPart) / 1000000.0f;
+                // frameTime = static_cast<float>(elapsedTime.QuadPart) / 1000000.0f;
+                frameTime = 0.016777f;
             }
         }
     }
@@ -1049,38 +1405,41 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         default:
             break;
         }
-
+    case WM_ACTIVATE:
+        windowActive = LOWORD(wParam);
         break;
 
     case WM_CHAR:
 
-    switch (wParam)
-    {
-    case 'W':
-    case 'w':
-        cameraPosition.z += moveSpeed * frameTime;
-        break;
+    // switch (wParam)
+    // {
+    // case 'W':
+    // case 'w':
+    //     cameraPosition.z += moveSpeed * frameTime;
+    //     break;
 
-    case 'S':
-    case 's':
-        cameraPosition.z -= moveSpeed * frameTime;
-        break;
+    // case 'S':
+    // case 's':
+    //     cameraPosition.z -= moveSpeed * frameTime;
+    //     break;
 
-    case 'A':
-    case 'a':
-        cameraPosition.x -= moveSpeed * frameTime;
-        lookAt.x -= moveSpeed * frameTime;
-        break;
+    // case 'A':
+    // case 'a':
+    //     cameraPosition.x -= moveSpeed * frameTime;
+    //     lookAt.x -= moveSpeed * frameTime;
+    //     break;
 
-    case 'D':
-    case 'd':
-        cameraPosition.x += moveSpeed * frameTime;
-        lookAt.x += moveSpeed * frameTime;
-        break;
+    // case 'D':
+    // case 'd':
+    //     cameraPosition.x += moveSpeed * frameTime;
+    //     lookAt.x += moveSpeed * frameTime;
+    //     break;
     
-    default:
-        break;
-    }
+    // default:
+    //     break;
+    // }
+
+    break;
 
 	default:
 		return DefWindowProc(hWnd, message, wParam, lParam);

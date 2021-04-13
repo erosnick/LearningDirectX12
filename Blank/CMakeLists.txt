@@ -10,6 +10,7 @@ set(CMAKE_C_FLAGS /source-charset:utf-8)
 
 add_executable(${PROJECT_NAME} WIN32 
     main.cpp
+    ./Common/lodepng.cpp
     ./imgui/imgui.cpp
     ./imgui/imgui_draw.cpp
     ./imgui/imgui_tables.cpp
