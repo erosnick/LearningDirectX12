@@ -1,4 +1,4 @@
-﻿#include "ShapesApp.h"
+﻿#include "LandAndWaves.h"
 #include "Common/d3dUtil.h"
 #include "Common/WICUtils.h"
 #include "Common/GeometryGenerator.h"
@@ -7,15 +7,20 @@
 #include "imgui/imgui_impl_win32.h"
 #include "imgui/imgui_impl_dx12.h"
 
+#include "Waves.h"
+
 #include <iostream>
 
-shapesApp::shapesApp(HINSTANCE inInstance, const uint32_t inWindowWidth, const uint32_t inWindowHeight)
+LandAndWaves::LandAndWaves(HINSTANCE inInstance, const uint32_t inWindowWidth, const uint32_t inWindowHeight)
 : d3dApp(inInstance, inWindowWidth, inWindowHeight) {
 
 }
 
-shapesApp::~shapesApp() {
-    frameResourceSync();
+LandAndWaves::~LandAndWaves() {
+    // 退出之前保证所有的帧资源都使用完毕
+    for (uint32_t i = 0; i < frameResourcesCount; i++) {
+        frameResourceSync();
+    }
 
 	ImGui_ImplDX12_Shutdown();
 	ImGui_ImplWin32_Shutdown();
@@ -25,7 +30,7 @@ shapesApp::~shapesApp() {
 // Forward declare message handler from imgui_impl_win32.cpp
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-LRESULT shapesApp::msgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+LRESULT LandAndWaves::msgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
 	{
 		return true;
@@ -39,7 +44,7 @@ LRESULT shapesApp::msgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	return d3dApp::msgProc(hwnd, msg, wParam, lParam);
 }
 
-bool shapesApp::initialize() {
+bool LandAndWaves::initialize() {
     if(!d3dApp::initialize()) {
         return false;
     }
@@ -67,7 +72,7 @@ bool shapesApp::initialize() {
 	return true;
 }
 
-void shapesApp::onResize() {
+void LandAndWaves::onResize() {
     d3dApp::onResize();
 
 	ImGui_ImplDX12_InvalidateDeviceObjects();
@@ -90,7 +95,7 @@ void shapesApp::onResize() {
     XMStoreFloat4x4(&projection, newProjection);
 }
 
-void shapesApp::update(float delta) {
+void LandAndWaves::update(float delta) {
     frameResourceSync();
 
     updateObjectConstantBuffers();
@@ -100,7 +105,7 @@ void shapesApp::update(float delta) {
 	buildImGuiWidgets();
 }
 
-void shapesApp::draw(float delta) {
+void LandAndWaves::draw(float delta) {
     // 重复使用记录命令的相关内存
     // 只有当与GPU关联的命令列表执行完成时，我们才能将其重置
     commandAllocator = currentFrameResource->commandAllocator;
@@ -180,18 +185,18 @@ void shapesApp::draw(float delta) {
 }
 
 // Convenience overrides for handling mouse input.
-void shapesApp::onMouseDown(WPARAM btnState, int32_t x, int32_t y) {
+void LandAndWaves::onMouseDown(WPARAM btnState, int32_t x, int32_t y) {
     lastMousePosition.x = x;
     lastMousePosition.y = y;
 
     SetCapture(mainWindow);
 }
 
-void shapesApp::onMouseUp(WPARAM btnState, int32_t x, int32_t y) {
+void LandAndWaves::onMouseUp(WPARAM btnState, int32_t x, int32_t y) {
     ReleaseCapture();
 }
 
-void shapesApp::onMouseMove(WPARAM btnState, int32_t x, int32_t y) {
+void LandAndWaves::onMouseMove(WPARAM btnState, int32_t x, int32_t y) {
     if ((btnState & MK_LBUTTON) != 0) {
         // 根据鼠标的移动距离计算旋转角度，并令每个像素都按此
         // 角度的1 / 4 旋转
@@ -214,24 +219,32 @@ void shapesApp::onMouseMove(WPARAM btnState, int32_t x, int32_t y) {
         radius += dx - dy;
 
         // 限制可视半径的范围
-        radius = MathHelper::Clamp(radius, 3.0f, 15.0f);
+        // radius = MathHelper::Clamp(radius, 3.0f, 15.0f);
     }
 
     lastMousePosition.x = x;
     lastMousePosition.y = y;
 }
 
-void shapesApp::onKeyDown(WPARAM btnState) {
+void LandAndWaves::onMouseWheel(int32_t delta) {
+    if (delta > 0) {
+        radius -= zoomSpeed;
+    }else {
+        radius += zoomSpeed;
+    }
+}
+
+void LandAndWaves::onKeyDown(WPARAM btnState) {
     if (btnState == VK_F2) {
         isWireframe = !isWireframe;
     }
 }
 
-void shapesApp::onKeyUp(WPARAM btnState) {
+void LandAndWaves::onKeyUp(WPARAM btnState) {
 
 }
 
-void shapesApp::createCBVSRVDescriptorHeaps() {
+void LandAndWaves::createCBVSRVDescriptorHeaps() {
     D3D12_DESCRIPTOR_HEAP_DESC CBVDescriptorHeapDesc;
     // objectCount * frameBackBufferCount + CRV(1) + SRV(1)
     objectCount = static_cast<uint32_t>(allRenderItems.size());
@@ -256,22 +269,24 @@ void shapesApp::createCBVSRVDescriptorHeaps() {
     ThrowIfFailed(device->CreateDescriptorHeap(&samplerDescriptorHeapDesc, IID_PPV_ARGS(samplerDescriptorHeap.GetAddressOf())));
 }
 
-void shapesApp::createFrameResources() {
+void LandAndWaves::createFrameResources() {
     for (int frameResourceIndex = 0; frameResourceIndex < frameBackBufferCount; frameResourceIndex++) {
         frameResources.push_back(std::make_unique<FrameUtil::FrameResources>(device.Get(), objectCount, 1, 1));
     }
 }
 
-void shapesApp::createConstantBufferViews() {
+void LandAndWaves::createConstantBufferViews() {
 
     UINT objectConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::ObjectConstants));
+    uint32_t passConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::PassConstants));
+    uint32_t materialConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::MaterialConstants));
 
     uint32_t objectCount = static_cast<uint32_t>(opaqueRenderItems.size());
 
-    for (size_t frameResourcesIndex = 0; frameResourcesIndex < frameResourcesCount; frameResourcesIndex++) {
+    for (uint32_t frameResourceIndex = 0; frameResourceIndex < frameResourcesCount; frameResourceIndex++) {
         
-        for (size_t objectIndex = 0; objectIndex < objectCount; objectIndex++) {
-            auto& objectConstantBuffer = frameResources[frameResourcesIndex]->objectConstantBuffer;
+        for (uint32_t objectIndex = 0; objectIndex < objectCount; objectIndex++) {
+            auto& objectConstantBuffer = frameResources[frameResourceIndex]->objectConstantBuffer;
             
             D3D12_GPU_VIRTUAL_ADDRESS objectConstantBufferAddress = objectConstantBuffer->Resource()->GetGPUVirtualAddress();
 
@@ -280,7 +295,7 @@ void shapesApp::createConstantBufferViews() {
 
             CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
-            int32_t descriptorHeapIndex = static_cast<uint32_t>(frameResourcesIndex) * objectCount + static_cast<uint32_t>(objectIndex);
+            int32_t descriptorHeapIndex = static_cast<uint32_t>(frameResourceIndex) * objectCount + static_cast<uint32_t>(objectIndex);
 
             CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
@@ -290,18 +305,14 @@ void shapesApp::createConstantBufferViews() {
 
             device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
         }
-    }
 
-    uint32_t passConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::PassConstants));
-
-    for (uint32_t frameResourcesIndex = 0; frameResourcesIndex < frameResourcesCount; frameResourcesIndex++) {
-        auto& passConstantBuffer = frameResources[frameResourcesIndex]->passConstantBuffer;
+        auto& passConstantBuffer = frameResources[frameResourceIndex]->passConstantBuffer;
 
         D3D12_GPU_VIRTUAL_ADDRESS passConstantBufferAddress = passConstantBuffer->Resource()->GetGPUVirtualAddress();
 
         CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
-        uint32_t descriptorHeapIndex = frameResourcesCount * objectCount + frameResourcesIndex;
+        int32_t descriptorHeapIndex = frameResourcesCount * objectCount + frameResourceIndex;
 
         CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
@@ -310,30 +321,57 @@ void shapesApp::createConstantBufferViews() {
         constantBufferViewDesc.SizeInBytes = passConstantBufferSize;
 
         device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
-    }
 
-    uint32_t materialConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::MaterialConstants));
-
-    for (uint32_t frameResourceIndex = 0; frameResourceIndex < frameResourcesCount; frameResourceIndex++) {
         auto& materialConstantBuffer = frameResources[frameResourceIndex]->materialConstantBuffer;
 
         D3D12_GPU_VIRTUAL_ADDRESS materialConstantBufferAddress = materialConstantBuffer->Resource()->GetGPUVirtualAddress();
 
-        CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+        CBVDescriptorHandle.Offset(frameResourcesCount, CBVSRVUAVDescriptorSize);
 
-        uint32_t descriptorHeapIndex = frameResourcesCount * (objectCount + 1) + frameResourceIndex;
-
-        CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
-
-        D3D12_CONSTANT_BUFFER_VIEW_DESC constantBufferViewDesc;
         constantBufferViewDesc.BufferLocation = materialConstantBufferAddress;
         constantBufferViewDesc.SizeInBytes = materialConstantBufferSize;
 
         device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
     }
+
+    // for (uint32_t frameResourcesIndex = 0; frameResourcesIndex < frameResourcesCount; frameResourcesIndex++) {
+    //     auto& passConstantBuffer = frameResources[frameResourcesIndex]->passConstantBuffer;
+
+    //     D3D12_GPU_VIRTUAL_ADDRESS passConstantBufferAddress = passConstantBuffer->Resource()->GetGPUVirtualAddress();
+
+    //     CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+    //     uint32_t descriptorHeapIndex = frameResourcesCount * objectCount + frameResourcesIndex;
+
+    //     CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
+
+    //     D3D12_CONSTANT_BUFFER_VIEW_DESC constantBufferViewDesc;
+    //     constantBufferViewDesc.BufferLocation = passConstantBufferAddress;
+    //     constantBufferViewDesc.SizeInBytes = passConstantBufferSize;
+
+    //     device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
+    // }
+
+    // for (uint32_t frameResourceIndex = 0; frameResourceIndex < frameResourcesCount; frameResourceIndex++) {
+    //     auto& materialConstantBuffer = frameResources[frameResourceIndex]->materialConstantBuffer;
+
+    //     D3D12_GPU_VIRTUAL_ADDRESS materialConstantBufferAddress = materialConstantBuffer->Resource()->GetGPUVirtualAddress();
+
+    //     CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+    //     uint32_t descriptorHeapIndex = frameResourcesCount * (objectCount + 1) + frameResourceIndex;
+
+    //     CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
+
+    //     D3D12_CONSTANT_BUFFER_VIEW_DESC constantBufferViewDesc;
+    //     constantBufferViewDesc.BufferLocation = materialConstantBufferAddress;
+    //     constantBufferViewDesc.SizeInBytes = materialConstantBufferSize;
+
+    //     device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
+    // }
 }
 
-void shapesApp::createShaderResourceView() {
+void LandAndWaves::createShaderResourceView() {
     // 最终创建SRV描述符
     D3D12_SHADER_RESOURCE_VIEW_DESC shaderResourceViewDesc = {};
 
@@ -355,7 +393,7 @@ void shapesApp::createShaderResourceView() {
     }
 }
 
-void shapesApp::createSampler() {
+void LandAndWaves::createSampler() {
     D3D12_SAMPLER_DESC samplerDesc;
 
     samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -375,7 +413,7 @@ void shapesApp::createSampler() {
     device->CreateSampler(&samplerDesc, samplerDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 }
 
-void shapesApp::createRootSignature() {
+void LandAndWaves::createRootSignature() {
     // 着色器程序一般需要以资源作为输入(例如常量缓冲区、纹理、采样器等)
     // 根签名则定义了着色器程序所需的具体资源，如果把着色器看作一个函数，
     // 而将输入的资源当作向函数传递的参数数据，那么便可类似第认为根签名
@@ -455,6 +493,10 @@ void shapesApp::createRootSignature() {
                                                D3D12_SHADER_VISIBILITY_PIXEL            // visibility, visibility to all stages allows sharing binding tables
                                                );
 
+    // slotRootParameter[0].InitAsConstantBufferView(0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE, D3D12_SHADER_VISIBILITY_VERTEX);
+    // slotRootParameter[1].InitAsConstantBufferView(1, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE, D3D12_SHADER_VISIBILITY_VERTEX);
+    // slotRootParameter[2].InitAsConstantBufferView(2, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE, D3D12_SHADER_VISIBILITY_PIXEL);
+
     // D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE
     // 表示描述符和纹理数据都是静态的, 设置后不会被修改, 能够获得驱动优化
     CD3DX12_DESCRIPTOR_RANGE1 SRVDescriptorTable;
@@ -509,7 +551,7 @@ void shapesApp::createRootSignature() {
     IID_PPV_ARGS(rootSignature.GetAddressOf())));
 }
 
-void shapesApp::createShadersAndInputLayout() {
+void LandAndWaves::createShadersAndInputLayout() {
 
     vertexShaderByteCode = d3dUtil::compileShader(L"Shaders/color.hlsl", L"VS", L"vs_6_0");
     pixelShaderByteCode = d3dUtil::compileShader(L"Shaders/color.hlsl", L"PS", L"ps_6_0");
@@ -522,7 +564,7 @@ void shapesApp::createShadersAndInputLayout() {
     };
 }
 
-void shapesApp::createBoxGeometry() {
+void LandAndWaves::createBoxGeometry() {
     // std::array<Vertex, 24> vertices = 
     // {
     //     // Front face
@@ -631,7 +673,7 @@ void shapesApp::createBoxGeometry() {
     boxGeometry->DrawArgs["Box"] = submesh;
 }
 
-void shapesApp::createPipelineStateOjbect() {
+void LandAndWaves::createPipelineStateOjbect() {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineStateObjectDesc;
 
     ZeroMemory(&pipelineStateObjectDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
@@ -657,7 +699,6 @@ void shapesApp::createPipelineStateOjbect() {
     // pipelineStateObjectDesc.PS = CD3DX12_SHADER_BYTECODE(pixelShaderByteCode.Get());
 
     D3D12_RASTERIZER_DESC rasterizerDesc = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    // rasterizerDesc.FillMode = D3D12_FILL_MODE_WIREFRAME;
 
     pipelineStateObjectDesc.RasterizerState = rasterizerDesc;
     pipelineStateObjectDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
@@ -689,7 +730,7 @@ void shapesApp::createPipelineStateOjbect() {
     graphicsPSOs["opaque_wireframe"] = opaqueWireframePipelineStateObject;
 }
 
-void shapesApp::loadResources() {
+void LandAndWaves::loadResources() {
     uint32_t textureWidth = 0;
     uint32_t textureHeight = 0;
     uint32_t bpp = 0;
@@ -871,11 +912,11 @@ void shapesApp::loadResources() {
     }
 }
 
-void shapesApp::buildShapeGeometry() {
+void LandAndWaves::buildShapeGeometry() {
     GeometryGenerator geometryGenerator;
 
     GeometryGenerator::MeshData box = geometryGenerator.CreateBox(1.0f, 1.0f, 1.0f, 0);
-    GeometryGenerator::MeshData grid = geometryGenerator.CreateGrid(10.0f, 10.0f, 10, 10);
+    GeometryGenerator::MeshData grid = geometryGenerator.CreateGrid(150.0f, 150.0f, 50, 50);
 
     // 将所有的结合体数据都合并到一对大的顶点/索引缓冲区中
     // 以此来定义每个子网格数据在缓冲区中所占的范围
@@ -914,7 +955,30 @@ void shapesApp::buildShapeGeometry() {
 
     for (size_t i = 0; i < grid.Vertices.size(); ++i, ++k) {
         vertices[k].position = grid.Vertices[i].Position;
-        // vertices[k].position.y = abs(sinf((1.0f / (rand() % 10)) * 3));
+        vertices[k].position.y = getHillsHeight(vertices[k].position.x, vertices[k].position.z, totalScale, xScale, zScale);
+        // vertices[k].position.y = 0.1f * (rand() % grid.Vertices.size() / 40);
+
+        if (vertices[i].position.y < -10.0f) {
+            // 沙滩的颜色
+            vertices[i].color = XMFLOAT4(1.0f, 0.96f, 0.62f, 1.0f);
+        }
+        else if (vertices[i].position.y < 5.0f) {
+            // 浅黄颜色
+            vertices[i].color = XMFLOAT4(0.48f, 0.77f, 0.46f, 1.0f);
+        }
+        else if (vertices[i].position.y < 12.0f) {
+            // 深黄颜色
+            vertices[i].color = XMFLOAT4(0.1f, 0.48f, 0.19f, 1.0f);
+        }
+        else if (vertices[i].position.y < 20.0f) {
+            // 深棕色
+            vertices[i].color = XMFLOAT4(0.45f, 0.39f, 0.34f, 1.0f);
+        }
+        else {
+            // 白雪皑皑
+            vertices[i].color = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+        }
+
         vertices[k].uv = grid.Vertices[i].TexC;
     }
 
@@ -953,7 +1017,11 @@ void shapesApp::buildShapeGeometry() {
     geometries[geometry->Name] = std::move(geometry);
 }
 
-void shapesApp::buildRenderItems() {
+void LandAndWaves::buildWavesGeometryBuffers() {
+    
+}
+
+void LandAndWaves::buildRenderItems() {
     auto boxRenderItem = std::make_unique<FrameUtil::RenderItem>();
 
     XMStoreFloat4x4(&boxRenderItem->world, XMMatrixScaling(1.1f, 1.1f, 1.1f) * XMMatrixTranslation(0.0f, 0.0f, 0.0f));
@@ -983,7 +1051,7 @@ void shapesApp::buildRenderItems() {
     }
 }
 
-void shapesApp::updateObjectConstantBuffers() {
+void LandAndWaves::updateObjectConstantBuffers() {
     // 用当前最新的worldViewProject矩阵来更新常量缓冲区
     auto currentObjectConstantBuffer = currentFrameResource->objectConstantBuffer.get();
 
@@ -1004,7 +1072,7 @@ void shapesApp::updateObjectConstantBuffers() {
     }
 }
 
-void shapesApp::updatePassConstantBuffers() {
+void LandAndWaves::updatePassConstantBuffers() {
    // 将球坐标转换为笛卡尔坐标
     float x = radius * sinf(phi) * cosf(theta);
     float z = radius * sinf(phi) * sinf(theta);
@@ -1069,24 +1137,24 @@ void shapesApp::updatePassConstantBuffers() {
     currentFrameResource->materialConstantBuffer->CopyData(0, materialConstants); 
 }
 
-void shapesApp::resetCommandList() {    
+void LandAndWaves::resetCommandList() {    
     // 重置命令列表为执行初始化命令做好准备工作
     ThrowIfFailed(commandList->Reset(commandAllocator.Get(), nullptr));
 }
 
-void shapesApp::executeCommandList() {
+void LandAndWaves::executeCommandList() {
     // 执行初始化命令
     ThrowIfFailed(commandList->Close());
     ID3D12CommandList* commandLists[] = {commandList.Get()};
     commandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
 }
 
-void shapesApp::prepareFrameResourceSync() {
+void LandAndWaves::prepareFrameResourceSync() {
     currentFrameResource->fenceValue = ++currentFenceValue;
     commandQueue->Signal(fence.Get(), currentFenceValue);
 }
 
-void shapesApp::frameResourceSync() {
+void LandAndWaves::frameResourceSync() {
     //每帧遍历一个帧资源（多帧的话就是环形遍历）
     currentFrameIndex = (currentFrameIndex + 1) % frameResourcesCount;
     currentFrameResource = frameResources[currentFrameIndex].get();
@@ -1103,7 +1171,11 @@ void shapesApp::frameResourceSync() {
     }
 }
 
-void shapesApp::initImGUI() 
+ float LandAndWaves::getHillsHeight(float x, float z, float totalScale, float xScale, float zScale) const {
+     return totalScale * (z * sinf(xScale * x) + x * cosf(zScale * z));
+ }
+
+void LandAndWaves::initImGUI() 
 {
 	// Setup Dear ImGui context
 	IMGUI_CHECKVERSION();
@@ -1122,7 +1194,7 @@ void shapesApp::initImGUI()
 		SRVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 }
 
-void shapesApp::buildImGuiWidgets()
+void LandAndWaves::buildImGuiWidgets()
 {
 	// 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
 	if (showDemoWindow)
@@ -1146,6 +1218,10 @@ void shapesApp::buildImGuiWidgets()
 			ImGui::Checkbox("Demo Window", &showDemoWindow);      // Edit bools storing our window open/close state
 			ImGui::Checkbox("Another Window", &showAnotherWindow);
             ImGui::Checkbox("Wireframe", &isWireframe);
+            ImGui::SliderFloat("Zoom Speed", &zoomSpeed, 0.1f, 1.0f);
+            ImGui::SliderFloat("Total Scale", &totalScale, 0.0f, 10.0f);
+            ImGui::SliderFloat("X Scale", &xScale, 0.0f, 10.0f);
+            ImGui::SliderFloat("Z Scale", &zScale, 0.0f, 10.0f);
 
 			ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
 			ImGui::ColorEdit3("clear color", (float*)&clearColor); // Edit 3 floats representing a color
@@ -1171,7 +1247,7 @@ void shapesApp::buildImGuiWidgets()
 	}
 }
 
-void shapesApp::updateImGui()
+void LandAndWaves::updateImGui()
 {
 	// Start the Dear ImGui frame
 	ImGui_ImplDX12_NewFrame();
@@ -1179,19 +1255,41 @@ void shapesApp::updateImGui()
 	ImGui::NewFrame();
 }
 
-void shapesApp::renderImGui()
+void LandAndWaves::renderImGui()
 {
 	ImGui::Render();
 	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), commandList.Get());
 }
 
-void shapesApp::drawRenderItems(const std::vector<FrameUtil::RenderItem*>& renderItems) {
-    uint32_t passConstantBufferIndex = frameResourcesCount * objectCount + currentFrameIndex;
-    uint32_t materialConstantBufferIndex = frameResourcesCount * (objectCount + 1) + currentFrameIndex;
-
+void LandAndWaves::drawRenderItems(const std::vector<FrameUtil::RenderItem*>& renderItems) {
     uint32_t SRVDescriptorIndex = (objectCount + 1 + 1) * frameResourcesCount;
 
+    // Pass常量缓冲区每帧只用设置一次
+    CD3DX12_GPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+    uint32_t passConstantBufferIndex = frameResourcesCount * objectCount + currentFrameIndex;
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE passCBVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+    passCBVDescriptorHandle.Offset(passConstantBufferIndex, CBVSRVUAVDescriptorSize);
+
+    commandList->SetGraphicsRootDescriptorTable(1, passCBVDescriptorHandle);
+
+    uint32_t materialConstantBufferIndex = frameResourcesCount * (objectCount + 1) + currentFrameIndex;
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE materialCBVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+    materialCBVDescriptorHandle.Offset(materialConstantBufferIndex, CBVSRVUAVDescriptorSize);
+
+    commandList->SetGraphicsRootDescriptorTable(2, materialCBVDescriptorHandle);
+
+    // commandList->SetGraphicsRootConstantBufferView(1, currentFrameResource->passConstantBuffer->Resource()->GetGPUVirtualAddress());
+
+    // commandList->SetGraphicsRootConstantBufferView(2, currentFrameResource->materialConstantBuffer->Resource()->GetGPUVirtualAddress());
+
     CD3DX12_GPU_DESCRIPTOR_HANDLE SRVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), SRVDescriptorIndex, CBVSRVUAVDescriptorSize);
+
+    uint32_t objectContantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::ObjectConstants));
 
     for (size_t renderItemIndex = 0; renderItemIndex < renderItems.size(); renderItemIndex++) {
         auto renderItem = renderItems[renderItemIndex];
@@ -1200,7 +1298,7 @@ void shapesApp::drawRenderItems(const std::vector<FrameUtil::RenderItem*>& rende
         commandList->IASetIndexBuffer(&renderItem->geometry->IndexBufferView());
         commandList->IASetPrimitiveTopology(renderItem->primitiveType);
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        CBVDescriptorHandle = CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
 
         int32_t descriptorHeapIndex = currentFrameIndex * objectCount + static_cast<uint32_t>(renderItemIndex);
 
@@ -1208,17 +1306,11 @@ void shapesApp::drawRenderItems(const std::vector<FrameUtil::RenderItem*>& rende
 
         commandList->SetGraphicsRootDescriptorTable(0, CBVDescriptorHandle);
 
-        CD3DX12_GPU_DESCRIPTOR_HANDLE passCBVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        D3D12_GPU_VIRTUAL_ADDRESS objectConstantBufferAddress = currentFrameResource->objectConstantBuffer->Resource()->GetGPUVirtualAddress();
 
-        passCBVDescriptorHandle.Offset(passConstantBufferIndex, CBVSRVUAVDescriptorSize);
+        objectConstantBufferAddress += renderItem->objectConstantBufferIndex * objectContantBufferSize;
 
-        commandList->SetGraphicsRootDescriptorTable(1, passCBVDescriptorHandle);
-
-        CD3DX12_GPU_DESCRIPTOR_HANDLE materialCBVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
-
-        materialCBVDescriptorHandle.Offset(materialConstantBufferIndex, CBVSRVUAVDescriptorSize);
-
-        commandList->SetGraphicsRootDescriptorTable(2, materialCBVDescriptorHandle);
+        // commandList->SetGraphicsRootConstantBufferView(0, objectConstantBufferAddress);
 
         commandList->SetGraphicsRootDescriptorTable(3, SRVDescriptorHandle);
 
@@ -1244,7 +1336,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance,
 
     try
     {
-        shapesApp app(hInstance, 1280, 720);
+        LandAndWaves app(hInstance, 1280, 720);
         if(!app.initialize())
             return 0;
 

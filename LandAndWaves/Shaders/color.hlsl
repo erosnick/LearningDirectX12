@@ -23,23 +23,23 @@ cbuffer constantBufferMaterial : register(b2)
 struct VertexIn
 {
 	float3 PosL  : POSITION;
-    float4 Color : COLOR;
+    float4 color : COLOR;
 	float2 uv : TEXCOORD;
 };
 
 struct VertexOut
 {
 	float4 PosH  : SV_POSITION;
-    float4 Color : COLOR;
+    float4 color : COLOR;
 	float2 uv : TEXCOORD;
 };
 
 Texture2D textures[] : register(t0);
 SamplerState textureSampler : register(s0);
 
-VertexOut VS(VertexIn vin)
+VertexOut VS(VertexIn input)
 {
-	VertexOut vout;
+	VertexOut output;
 
 	// float4 posW = mul(float4(vin.PosL, 1.0f), world);
 
@@ -84,19 +84,20 @@ VertexOut VS(VertexIn vin)
 	// vout.PosH = mul(posV, projection);
 	// float4 posV = mul(view, float4(vin.PosL, 1.0f));
 	// float4.PosH = mul(projection, posV);
-	float4 posW = mul(float4(vin.PosL, 1.0f), world);
-	vout.PosH = mul(posW, viewProjection);
+	float4 posW = mul(float4(input.PosL, 1.0f), world);
+	output.PosH = mul(posW, viewProjection);
 	
 	// Just pass vertex color into the pixel shader.
-    vout.Color = vin.Color;
-	vout.uv = vin.uv;
+    output.color = input.color;
+	output.uv = input.uv;
     
-    return vout;
+    return output;
 }
 
-float4 PS(VertexOut pin) : SV_Target
+float4 PS(VertexOut input) : SV_Target
 {
-    return textures[materialIndex].Sample(textureSampler, pin.uv);
+    // return textures[0].Sample(textureSampler, pin.uv);
+	return input.color;
 }
 
 
