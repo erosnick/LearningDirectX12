@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "*.fsh": "hlsl",
+        "*.hlsl": "hlsl",
         "ostream": "cpp",
         "iosfwd": "cpp",
         "memory": "cpp",
@@ -55,6 +56,13 @@
         "xstring": "cpp",
         "xtr1common": "cpp",
         "xtree": "cpp",
-        "xutility": "cpp"
+        "xutility": "cpp",
+        "chrono": "cpp",
+        "condition_variable": "cpp",
+        "functional": "cpp",
+        "mutex": "cpp",
+        "ratio": "cpp",
+        "stop_token": "cpp",
+        "thread": "cpp"
     }
 }

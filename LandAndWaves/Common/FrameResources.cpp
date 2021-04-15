@@ -2,7 +2,7 @@
 #include "d3dUtil.h"
 
 namespace FrameUtil {
-    FrameResources::FrameResources(ID3D12Device* device, uint32_t objectCount, uint32_t passCount, uint32_t materialCount) {
+    FrameResources::FrameResources(ID3D12Device* device, uint32_t objectCount, uint32_t passCount, uint32_t materialCount, uint32_t waveVertexCount) {
         ThrowIfFailed(device->CreateCommandAllocator(
         D3D12_COMMAND_LIST_TYPE_DIRECT, 
         IID_PPV_ARGS(&commandAllocator)));
@@ -10,5 +10,6 @@ namespace FrameUtil {
         objectConstantBuffer = std::make_unique<UploadBuffer<ObjectConstants>>(device, objectCount, true);
         passConstantBuffer = std::make_unique<UploadBuffer<PassConstants>>(device, passCount, true);
         materialConstantBuffer = std::make_unique<UploadBuffer<MaterialConstants>>(device, materialCount, true);
+        wavesVertexBuffer = std::make_unique<UploadBuffer<Vertex>>(device, waveVertexCount, false);
     }
 }

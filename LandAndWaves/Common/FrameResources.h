@@ -70,7 +70,7 @@ namespace FrameUtil {
     // 而3帧的命令储备相当于一个3个帧资源元素的环形 数组，随着GPU的进程，CPU不断更新环形数组中的数据元素。
     class FrameResources {
     public:
-        FrameResources(ID3D12Device* device, uint32_t objectCount, uint32_t passCount, uint32_t materialCount);
+        FrameResources(ID3D12Device* device, uint32_t objectCount, uint32_t passCount, uint32_t materialCount, uint32_t waveVertexCount);
         FrameResources(const FrameResources& rhs) = delete;
         FrameResources& operator=(const FrameResources& rhs) = delete;
 
@@ -83,6 +83,8 @@ namespace FrameUtil {
         std::unique_ptr<UploadBuffer<FrameResources::ObjectConstants>> objectConstantBuffer = nullptr;
         std::unique_ptr<UploadBuffer<FrameResources::PassConstants>> passConstantBuffer = nullptr;
         std::unique_ptr<UploadBuffer<FrameResources::MaterialConstants>> materialConstantBuffer = nullptr;
+
+        std::unique_ptr<UploadBuffer<Vertex>> wavesVertexBuffer = nullptr;
 
         // 通过围栏值将命令标记到此围栏点，这使我们可以检测到GPU是否还在使用这些帧资源
         uint64_t fenceValue = 0;

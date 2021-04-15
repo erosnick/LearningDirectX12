@@ -15,6 +15,11 @@ using namespace DirectX;
 
 class Waves;
 
+enum class RenderLayer : int {
+	Opaque = 0,
+	Count
+};
+
 class LandAndWaves : public d3dApp {
 public:
 
@@ -54,10 +59,12 @@ protected:
 
     void buildShapeGeometry();
     void buildWavesGeometryBuffers();
+    std::unique_ptr<FrameUtil::RenderItem> createRenderItem(uint32_t objectConstantBufferIndex, MeshGeometry* geometry, const std::string& name);
     void buildRenderItems();
 
     void updateObjectConstantBuffers();
     void updatePassConstantBuffers();
+    void updateWaves();
 
     void resetCommandList();
     void executeCommandList();
@@ -94,7 +101,7 @@ private:
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> inputLayout;
 
-    FrameUtil::RenderItem* mWavesRitem = nullptr;
+    FrameUtil::RenderItem* wavesRenderItemCopy = nullptr;
 
     std::unique_ptr<Waves> waves;
 
@@ -103,13 +110,13 @@ private:
 
     std::vector<std::unique_ptr<FrameUtil::FrameResources>> frameResources;
 
+    // Render items divided by PSO.
+    // 根据PSO来划分渲染项
+	std::vector<FrameUtil::RenderItem*> renderItemLayer[(int)RenderLayer::Count];
+
     std::vector<std::unique_ptr<FrameUtil::RenderItem>> allRenderItems;
 
     FrameUtil::FrameResources* currentFrameResource;
-
-    // 根据PSO来划分渲染项
-    std::vector<FrameUtil::RenderItem*> opaqueRenderItems;
-    std::vector<FrameUtil::RenderItem*> transparentRenderItems;
 
     std::unordered_map<std::string, std::unique_ptr<MeshGeometry>> geometries;
     std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> graphicsPSOs;
@@ -122,7 +129,7 @@ private:
 
     float theta = 1.5f * XM_PI;
     float phi = XM_PIDIV4;
-    float radius = 5.0f;
+    float radius = 50.0f;
 
     POINT lastMousePosition;
 
@@ -135,7 +142,7 @@ private:
     float totalScale = 0.3f;
     float xScale = 0.1f;
     float zScale = 0.1f;
-    float zoomSpeed = 0.1f;
+    float zoomSpeed = 0.5f;
 
     DXGI_FORMAT textureFormat;
 };

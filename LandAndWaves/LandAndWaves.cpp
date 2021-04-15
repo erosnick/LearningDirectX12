@@ -2,6 +2,7 @@
 #include "Common/d3dUtil.h"
 #include "Common/WICUtils.h"
 #include "Common/GeometryGenerator.h"
+#include "Common/MathHelper.h"
 #include <DirectXColors.h>
 
 #include "imgui/imgui_impl_win32.h"
@@ -49,10 +50,13 @@ bool LandAndWaves::initialize() {
         return false;
     }
 
+    waves = std::make_unique<Waves>(128, 128, 1.0f, 0.03f, 4.0f, 0.2f);
+
     resetCommandList();
 
     createBoxGeometry();
     buildShapeGeometry();
+    buildWavesGeometryBuffers();
     buildRenderItems();
     loadResources();
 
@@ -103,6 +107,7 @@ void LandAndWaves::update(float delta) {
 
     updateImGui();
 	buildImGuiWidgets();
+    updateWaves();
 }
 
 void LandAndWaves::draw(float delta) {
@@ -151,7 +156,7 @@ void LandAndWaves::draw(float delta) {
 
     uint32_t passConstantBufferIndex = frameResourcesCount * objectCount + currentFrameIndex;
 
-    drawRenderItems(opaqueRenderItems);
+    drawRenderItems(renderItemLayer[(int)RenderLayer::Opaque]);
    
     uint32_t SRVDescriptorIndex = (objectCount + 1) * frameResourcesCount;
 
@@ -271,7 +276,7 @@ void LandAndWaves::createCBVSRVDescriptorHeaps() {
 
 void LandAndWaves::createFrameResources() {
     for (int frameResourceIndex = 0; frameResourceIndex < frameBackBufferCount; frameResourceIndex++) {
-        frameResources.push_back(std::make_unique<FrameUtil::FrameResources>(device.Get(), objectCount, 1, 1));
+        frameResources.push_back(std::make_unique<FrameUtil::FrameResources>(device.Get(), objectCount, 1, 1, waves->VertexCount()));
     }
 }
 
@@ -281,7 +286,7 @@ void LandAndWaves::createConstantBufferViews() {
     uint32_t passConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::PassConstants));
     uint32_t materialConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::MaterialConstants));
 
-    uint32_t objectCount = static_cast<uint32_t>(opaqueRenderItems.size());
+    uint32_t objectCount = static_cast<uint32_t>(allRenderItems.size());
 
     for (uint32_t frameResourceIndex = 0; frameResourceIndex < frameResourcesCount; frameResourceIndex++) {
         
@@ -916,7 +921,8 @@ void LandAndWaves::buildShapeGeometry() {
     GeometryGenerator geometryGenerator;
 
     GeometryGenerator::MeshData box = geometryGenerator.CreateBox(1.0f, 1.0f, 1.0f, 0);
-    GeometryGenerator::MeshData grid = geometryGenerator.CreateGrid(150.0f, 150.0f, 50, 50);
+    GeometryGenerator::MeshData grid = geometryGenerator.CreateGrid(160.0f, 160.0f, 50, 50);
+    GeometryGenerator::MeshData geometrySphere = geometryGenerator.CreateGeosphere(5.0f, 3);
 
     // 将所有的结合体数据都合并到一对大的顶点/索引缓冲区中
     // 以此来定义每个子网格数据在缓冲区中所占的范围
@@ -924,10 +930,12 @@ void LandAndWaves::buildShapeGeometry() {
     // 对合并顶点缓冲区中的每个物体的顶点偏移量进行缓存
     uint32_t boxVertexOffset = 0;
     uint32_t gridVertexOffset = boxVertexOffset + static_cast<uint32_t>(box.Vertices.size());
+    uint32_t geometrySphereVertexOffset = gridVertexOffset + static_cast<uint32_t>(grid.Vertices.size());
 
     // 对合并索引缓冲区中的每个物体的起始索引进行缓存
     uint32_t boxIndexOffset = 0;
     uint32_t gridIndexOffset = boxIndexOffset + static_cast<uint32_t>(box.Indices32.size());
+    uint32_t geometrySphereIndexOffset = gridIndexOffset + static_cast<uint32_t>(grid.Indices32.size());
 
     // 定义多个SubmeshGeometry结构体中包含了顶点/索引缓冲区内不同几何体的子网格数据
     SubmeshGeometry boxSubmesh;
@@ -940,9 +948,13 @@ void LandAndWaves::buildShapeGeometry() {
     gridSubmesh.StartIndexLocation = gridIndexOffset;
     gridSubmesh.BaseVertexLocation = gridVertexOffset;
 
+    SubmeshGeometry geometrySphereMesh;
+    geometrySphereMesh.IndexCount = static_cast<uint32_t>(geometrySphere.Indices32.size());
+    geometrySphereMesh.StartIndexLocation = geometrySphereIndexOffset;
+    geometrySphereMesh.BaseVertexLocation = geometrySphereVertexOffset;
 
     // 提取出所需的顶点元素，再将所有网格的顶点装进一个顶点缓冲区
-    auto totalVertexCount = box.Vertices.size() + grid.Vertices.size();
+    auto totalVertexCount = box.Vertices.size() + grid.Vertices.size() + geometrySphere.Vertices.size();
 
     std::vector<FrameUtil::Vertex> vertices(totalVertexCount);
 
@@ -982,10 +994,18 @@ void LandAndWaves::buildShapeGeometry() {
         vertices[k].uv = grid.Vertices[i].TexC;
     }
 
+    for (size_t i = 0; i < geometrySphere.Vertices.size(); ++i, ++k) {
+        vertices[k].position = geometrySphere.Vertices[i].Position;
+        XMFLOAT3 normal = geometrySphere.Vertices[i].Normal;
+        vertices[k].color = XMFLOAT4(normal.x, normal.y, normal.z, 1.0f);
+        vertices[k].uv = geometrySphere.Vertices[i].TexC;
+    }
+
     std::vector<std::uint32_t> indices;
 
     indices.insert(indices.end(), box.Indices32.begin(), box.Indices32.end());
     indices.insert(indices.end(), grid.Indices32.begin(), grid.Indices32.end());
+    indices.insert(indices.end(), geometrySphere.Indices32.begin(), geometrySphere.Indices32.end());
 
     const uint32_t vertexBufferByteSize = (uint32_t)vertices.size() * sizeof(FrameUtil::Vertex);
     const uint32_t indexBufferByteSize = (uint32_t)indices.size() * sizeof(std::uint32_t);
@@ -1012,43 +1032,134 @@ void LandAndWaves::buildShapeGeometry() {
     geometry->IndexBufferByteSize = indexBufferByteSize;
 
     geometry->DrawArgs["Box"] = boxSubmesh;
-    geometry->DrawArgs["Grid"] = gridSubmesh;
+    geometry->DrawArgs["Land"] = gridSubmesh;
+    geometry->DrawArgs["Sphere"] = geometrySphereMesh;
 
     geometries[geometry->Name] = std::move(geometry);
 }
 
 void LandAndWaves::buildWavesGeometryBuffers() {
+    std::vector<uint16_t> indices(3 * waves->TriangleCount());
+    assert(waves->VertexCount() < 0x0000ffff);
+
+    int32_t row = waves->RowCount();
+    int32_t column = waves->ColumnCount();
+    int k = 0;
+
+    for (int32_t i = 0; i < row - 1; i++) {
+        for (int32_t j = 0; j < column - 1; j++) {
+            indices[k] = i * column + j;
+			indices[k + 1] = i * column + j + 1;
+			indices[k + 2] = (i + 1)* column + j;
+
+			indices[k + 3] = (i + 1) * column + j;
+			indices[k + 4] = i * column + j + 1;
+			indices[k + 5] = (i + 1) * column + j + 1;
+
+			k += 6; // next quad
+        }
+    }
+
+    uint32_t vertexBufferByteSize = waves->VertexCount() * sizeof(FrameUtil::Vertex);
+    uint32_t indexBufferByteSize = static_cast<uint32_t>(indices.size()) * sizeof(uint16_t);
     
+    auto geometry = std::make_unique<MeshGeometry>();
+    geometry->Name = "WaterGeometry";
+
+    geometry->VertexBufferCPU = nullptr;
+    geometry->VertexBufferGPU = nullptr;
+
+    ThrowIfFailed(D3DCreateBlob(indexBufferByteSize, &geometry->IndexBufferCPU));
+    CopyMemory(geometry->IndexBufferCPU->GetBufferPointer(), indices.data(), indexBufferByteSize);
+
+    geometry->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(),
+        commandList.Get(), indices.data(), indexBufferByteSize, geometry->IndexBufferUploader);
+
+    geometry->VertexByteStride = sizeof(FrameUtil::Vertex);
+    geometry->VertexBufferByteSize = vertexBufferByteSize;
+    geometry->IndexFormat = DXGI_FORMAT_R16_UINT;
+    geometry->IndexBufferByteSize = indexBufferByteSize;
+
+    SubmeshGeometry submesh;
+    submesh.IndexCount = static_cast<uint32_t>(indices.size());
+    submesh.StartIndexLocation = 0;
+    submesh.BaseVertexLocation = 0;
+
+    geometry->DrawArgs["Waves"] = submesh;
+    geometries["WaterGeometry"] = std::move(geometry);
+}
+
+std::unique_ptr<FrameUtil::RenderItem> LandAndWaves::createRenderItem(uint32_t objectConstantBufferIndex, MeshGeometry* geometry, const std::string& name) {
+    auto renderItem = std::make_unique<FrameUtil::RenderItem>();
+    renderItem->world = MathHelper::Identity4x4();
+    renderItem->objectConstantBufferIndex = objectConstantBufferIndex;
+    renderItem->geometry = geometry;
+    renderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    renderItem->indexCount =  geometry->DrawArgs[name].IndexCount;
+    renderItem->startIndexLocation = geometry->DrawArgs[name].StartIndexLocation;
+    renderItem->baseVertexLocation = geometry->DrawArgs[name].BaseVertexLocation;
+
+    return renderItem;
 }
 
 void LandAndWaves::buildRenderItems() {
     auto boxRenderItem = std::make_unique<FrameUtil::RenderItem>();
 
-    XMStoreFloat4x4(&boxRenderItem->world, XMMatrixScaling(1.1f, 1.1f, 1.1f) * XMMatrixTranslation(0.0f, 0.0f, 0.0f));
-    boxRenderItem->objectConstantBufferIndex = 0;
-    boxRenderItem->geometry = geometries["ShapeGeometry"].get();
-    boxRenderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-    boxRenderItem->indexCount = boxRenderItem->geometry->DrawArgs["Box"].IndexCount;
-    boxRenderItem->startIndexLocation = boxRenderItem->geometry->DrawArgs["Box"].StartIndexLocation;
-    boxRenderItem->baseVertexLocation = boxRenderItem->geometry->DrawArgs["Box"].BaseVertexLocation;
+    auto shapeGeometry = geometries["ShapeGeometry"].get();
 
-    auto gridRenderItem = std::make_unique<FrameUtil::RenderItem>();
+    boxRenderItem = createRenderItem(0, shapeGeometry, "Box");
 
-    XMStoreFloat4x4(&gridRenderItem->world, XMMatrixScaling(1.1f, 1.1f, 1.1f) * XMMatrixTranslation(0.0f, -1.0f, 0.0f));
-    gridRenderItem->objectConstantBufferIndex = 1;
-    gridRenderItem->geometry = geometries["ShapeGeometry"].get();
-    gridRenderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-    gridRenderItem->indexCount = gridRenderItem->geometry->DrawArgs["Grid"].IndexCount;
-    gridRenderItem->startIndexLocation = gridRenderItem->geometry->DrawArgs["Grid"].StartIndexLocation;
-    gridRenderItem->baseVertexLocation = gridRenderItem->geometry->DrawArgs["Grid"].BaseVertexLocation;
+    // XMStoreFloat4x4(&boxRenderItem->world, XMMatrixScaling(1.1f, 1.1f, 1.1f) * XMMatrixTranslation(0.0f, 0.0f, 0.0f));
+    // boxRenderItem->objectConstantBufferIndex = 0;
+    // boxRenderItem->geometry = geometries["ShapeGeometry"].get();
+    // boxRenderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    // boxRenderItem->indexCount = boxRenderItem->geometry->DrawArgs["Box"].IndexCount;
+    // boxRenderItem->startIndexLocation = boxRenderItem->geometry->DrawArgs["Box"].StartIndexLocation;
+    // boxRenderItem->baseVertexLocation = boxRenderItem->geometry->DrawArgs["Box"].BaseVertexLocation;
+
+    renderItemLayer[(int)RenderLayer::Opaque].push_back(boxRenderItem.get());
+
+    auto landRenderItem = std::make_unique<FrameUtil::RenderItem>();
+
+    XMStoreFloat4x4(&landRenderItem->world, XMMatrixScaling(1.1f, 1.1f, 1.1f) * XMMatrixTranslation(0.0f, -1.0f, 0.0f));
+    landRenderItem->objectConstantBufferIndex = 1;
+    landRenderItem->geometry = geometries["ShapeGeometry"].get();
+    landRenderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    landRenderItem->indexCount = landRenderItem->geometry->DrawArgs["Land"].IndexCount;
+    landRenderItem->startIndexLocation = landRenderItem->geometry->DrawArgs["Land"].StartIndexLocation;
+    landRenderItem->baseVertexLocation = landRenderItem->geometry->DrawArgs["Land"].BaseVertexLocation;
+
+    renderItemLayer[(int)RenderLayer::Opaque].push_back(landRenderItem.get());
+
+    auto wavesRenderItem = std::make_unique<FrameUtil::RenderItem>();
+    wavesRenderItem->world = MathHelper::Identity4x4();
+    wavesRenderItem->objectConstantBufferIndex = 2;
+    wavesRenderItem->geometry = geometries["WaterGeometry"].get();
+    wavesRenderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    wavesRenderItem->indexCount = wavesRenderItem->geometry->DrawArgs["Waves"].IndexCount;
+    wavesRenderItem->startIndexLocation = wavesRenderItem->geometry->DrawArgs["Waves"].StartIndexLocation;
+    wavesRenderItem->baseVertexLocation = wavesRenderItem->geometry->DrawArgs["Waves"].BaseVertexLocation;
+
+    wavesRenderItemCopy = wavesRenderItem.get();
+
+    renderItemLayer[(int)RenderLayer::Opaque].push_back(wavesRenderItem.get());
+
+    auto geometrySphereRenderItem = std::make_unique<FrameUtil::RenderItem>();
+
+    geometrySphereRenderItem->world = MathHelper::Identity4x4();
+    geometrySphereRenderItem->objectConstantBufferIndex = 3;
+    geometrySphereRenderItem->geometry = geometries["ShapeGeometry"].get();
+    geometrySphereRenderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    geometrySphereRenderItem->indexCount = geometrySphereRenderItem->geometry->DrawArgs["Sphere"].IndexCount;
+    geometrySphereRenderItem->startIndexLocation = geometrySphereRenderItem->geometry->DrawArgs["Sphere"].StartIndexLocation;
+    geometrySphereRenderItem->baseVertexLocation = geometrySphereRenderItem->geometry->DrawArgs["Sphere"].BaseVertexLocation;
+
+    renderItemLayer[(int)RenderLayer::Opaque].push_back(geometrySphereRenderItem.get());
 
     allRenderItems.push_back(std::move(boxRenderItem));
-    allRenderItems.push_back(std::move(gridRenderItem));
-
-    // 此演示程序中所有的渲染项都是非透明的
-    for (auto& element : allRenderItems) {
-        opaqueRenderItems.push_back(element.get());
-    }
+    allRenderItems.push_back(std::move(landRenderItem));
+    allRenderItems.push_back(std::move(wavesRenderItem));
+    allRenderItems.push_back(std::move(geometrySphereRenderItem));
 }
 
 void LandAndWaves::updateObjectConstantBuffers() {
@@ -1137,6 +1248,40 @@ void LandAndWaves::updatePassConstantBuffers() {
     currentFrameResource->materialConstantBuffer->CopyData(0, materialConstants); 
 }
 
+void LandAndWaves::updateWaves() {
+    // 每0.25秒，生成一个随机波浪
+    static float baseTime = 0.0f;
+
+    if ((timer.TotalTime() - baseTime) >= 0.025f) {
+        baseTime += 0.025f;
+
+        int i = MathHelper::Rand(4, waves->RowCount() - 5);
+        int j = MathHelper::Rand(4, waves->ColumnCount() - 5);
+
+        float r = MathHelper::RandF(0.2f, 0.5f);
+
+        waves->Disturb(i, j, r);
+    }
+
+    // 更新波浪模拟
+    waves->Update(timer.DeltaTime());
+
+    // 使用新的位置来更新顶点缓冲
+    auto currentWaveVertexBuffer = currentFrameResource->wavesVertexBuffer.get();
+
+    for (int i = 0; i < waves->VertexCount(); ++i) {
+        FrameUtil::Vertex vertex;
+
+        vertex.position = waves->Position(i);
+        vertex.color = XMFLOAT4(Colors::Blue);
+
+        currentWaveVertexBuffer->CopyData(i, vertex);
+    }
+
+    // 将波浪渲染项的动态顶点缓冲设置为当前帧的波浪顶点缓冲
+    wavesRenderItemCopy->geometry->VertexBufferGPU = currentWaveVertexBuffer->Resource();
+}
+
 void LandAndWaves::resetCommandList() {    
     // 重置命令列表为执行初始化命令做好准备工作
     ThrowIfFailed(commandList->Reset(commandAllocator.Get(), nullptr));
@@ -1218,7 +1363,7 @@ void LandAndWaves::buildImGuiWidgets()
 			ImGui::Checkbox("Demo Window", &showDemoWindow);      // Edit bools storing our window open/close state
 			ImGui::Checkbox("Another Window", &showAnotherWindow);
             ImGui::Checkbox("Wireframe", &isWireframe);
-            ImGui::SliderFloat("Zoom Speed", &zoomSpeed, 0.1f, 1.0f);
+            ImGui::SliderFloat("Zoom Speed", &zoomSpeed, 0.5f, 5.0f);
             ImGui::SliderFloat("Total Scale", &totalScale, 0.0f, 10.0f);
             ImGui::SliderFloat("X Scale", &xScale, 0.0f, 10.0f);
             ImGui::SliderFloat("Z Scale", &zScale, 0.0f, 10.0f);
