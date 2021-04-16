@@ -151,9 +151,11 @@ LRESULT d3dApp::msgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		onMouseDown(wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
 		return 0;
 	case WM_LBUTTONUP:
+        onMouseUp(MK_MBUTTON, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
 	case WM_MBUTTONUP:
+        onMouseUp(MK_MBUTTON, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
 	case WM_RBUTTONUP:
-		onMouseUp(wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+		onMouseUp(MK_RBUTTON, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
 		return 0;
 	case WM_MOUSEMOVE:
 		onMouseMove(wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));

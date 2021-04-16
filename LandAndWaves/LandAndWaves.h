@@ -3,7 +3,7 @@
 #include "d3dApp.h"
 #include "Common/MathHelper.h"
 #include "Common/UploadBuffer.h"
-
+#include "Common/GeometryGenerator.h"
 #include <windef.h>
 
 #include "imgui/imgui.h"
@@ -56,10 +56,10 @@ protected:
     void createPipelineStateOjbect();
 
     void loadResources();
-
+    GeometryGenerator::MeshData loadSkullMeshData();
     void buildShapeGeometry();
     void buildWavesGeometryBuffers();
-    std::unique_ptr<FrameUtil::RenderItem> createRenderItem(uint32_t objectConstantBufferIndex, MeshGeometry* geometry, const std::string& name);
+    std::unique_ptr<FrameUtil::RenderItem> createRenderItem(const XMMATRIX& world, uint32_t objectConstantBufferIndex, MeshGeometry* geometry, const std::string& name);
     void buildRenderItems();
 
     void updateObjectConstantBuffers();
@@ -134,7 +134,7 @@ private:
     POINT lastMousePosition;
 
     bool isWireframe = false;
-    	// Our state
+    // Our state
 	bool showMainWindow = true;
 	bool showDemoWindow = true;
 	bool showAnotherWindow = false;
@@ -143,6 +143,7 @@ private:
     float xScale = 0.1f;
     float zScale = 0.1f;
     float zoomSpeed = 0.5f;
-
     DXGI_FORMAT textureFormat;
+    XMFLOAT3 cameraPosition;
+    bool isPan = false;
 };

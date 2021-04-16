@@ -1,7 +1,6 @@
 ﻿#include "LandAndWaves.h"
 #include "Common/d3dUtil.h"
 #include "Common/WICUtils.h"
-#include "Common/GeometryGenerator.h"
 #include "Common/MathHelper.h"
 #include <DirectXColors.h>
 
@@ -14,7 +13,9 @@
 
 LandAndWaves::LandAndWaves(HINSTANCE inInstance, const uint32_t inWindowWidth, const uint32_t inWindowHeight)
 : d3dApp(inInstance, inWindowWidth, inWindowHeight) {
-
+    cameraPosition.x = radius * sinf(phi) * cosf(theta);
+    cameraPosition.z = radius * sinf(phi) * sinf(theta);
+    cameraPosition.y = radius * cosf(phi);
 }
 
 LandAndWaves::~LandAndWaves() {
@@ -194,10 +195,18 @@ void LandAndWaves::onMouseDown(WPARAM btnState, int32_t x, int32_t y) {
     lastMousePosition.x = x;
     lastMousePosition.y = y;
 
+    if (btnState & MK_MBUTTON) {
+        isPan = true;
+    }
+
     SetCapture(mainWindow);
 }
 
 void LandAndWaves::onMouseUp(WPARAM btnState, int32_t x, int32_t y) {
+    if (btnState & MK_MBUTTON) {
+        isPan = false;
+    }
+
     ReleaseCapture();
 }
 
@@ -225,6 +234,40 @@ void LandAndWaves::onMouseMove(WPARAM btnState, int32_t x, int32_t y) {
 
         // 限制可视半径的范围
         // radius = MathHelper::Clamp(radius, 3.0f, 15.0f);
+    }
+    else if (btnState & MK_MBUTTON) {
+        // 当鼠标中键按下时
+        float dx = 0.25f * static_cast<float>(x - lastMousePosition.x);
+        float dy = 0.25f * static_cast<float>(y - lastMousePosition.y);
+
+        XMVECTOR position = XMVectorSet(cameraPosition.x, cameraPosition.y, cameraPosition.z, 1.0f);
+
+        XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0);
+
+        XMVECTOR right = XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f);
+
+        position = position + up * dy;
+        position = position + right * dx;
+
+        float x = XMVectorGetX(position);
+        float y = XMVectorGetY(position);
+        float z = XMVectorGetZ(position);
+
+        cameraPosition.x = x;
+        cameraPosition.y = y;
+        cameraPosition.z = z;
+
+        // 原始公式
+        // r = sqrtf(x * x + y * y + z * z)
+        // θ = arccos(z / r)
+        // Φ = arttan(y / x)
+        // 右手坐标系中y和z轴对调了，所以下面
+        // 的公式中y和z值也要进行对调
+        radius = sqrtf(x * x + y * y + z * z);
+        phi = acosf(y / radius);
+        // 这里用atan2的原因是我们需要[-PI, PI]的值域
+        // 而atan的值域是[-PI / 2, PI / 2]
+        theta = atan2(z, x);
     }
 
     lastMousePosition.x = x;
@@ -917,12 +960,146 @@ void LandAndWaves::loadResources() {
     }
 }
 
+void split(const std::string& inString, const std::string& pattern, std::vector<std::string>& result) {
+    std::string source = inString;
+
+    // 当最后一次find时会找到末尾的pattern，方便退出循环
+    source += pattern;
+
+    size_t size = source.size();
+
+    for (size_t i = 0; i < size; i++) {
+        size_t position = source.find(pattern, i);
+
+        // 找到位于末尾的pattern时，position = size - 1
+        // 正好可以处理最后一个字符串子串，就不用对它
+        // 进行特殊处理了
+        if (position < size) {
+            // 截取find起始位置和pattern出现位置之间的字符串(注意和下面的注释配合理解)
+            std::string slice = source.substr(i, position - i);
+            result.push_back(slice);
+            // 将i跳到上一次pattern出现的位置，
+            // 下次循环i++之后正好位于pattern后字符串的首位
+            i = position + pattern.size() - 1;
+        }
+    }
+}
+
+GeometryGenerator::Vertex createVertex(const std::vector<std::string>& vertexString) {
+    GeometryGenerator::Vertex vertex;
+
+    vertex.Position.x = static_cast<float>(atof(vertexString[0].c_str()));
+    vertex.Position.y = static_cast<float>(atof(vertexString[1].c_str()));
+    vertex.Position.z = static_cast<float>(atof(vertexString[2].c_str()));
+    vertex.Normal.x =static_cast<float>(atof(vertexString[3].c_str()));
+    vertex.Normal.y =static_cast<float>(atof(vertexString[4].c_str()));
+    vertex.Normal.z =static_cast<float>(atof(vertexString[5].c_str()));
+
+    return vertex;
+}
+
+GeometryGenerator::MeshData LandAndWaves::loadSkullMeshData() {
+    std::ifstream file("Models/skull.txt");
+
+    const size_t lineLength = 256;
+
+    std::string line;
+
+    std::string vertexCountPattern = "VertexCount: ";
+    std::string triangleCountPattern = "TriangleCount: ";
+
+    std::vector<GeometryGenerator::Vertex> vertices;
+    std::vector<uint32_t> indices;
+
+    if (!file.eof()) {
+        uint32_t vertexCount = 0;
+        uint32_t triangleCount = 0;
+
+        // 获得顶点数:VertexCount: 31076
+        std::getline(file, line);
+
+        size_t position = line.find(vertexCountPattern);
+
+        if (position != std::string::npos) {
+            std::string vertexCountString = line.substr(vertexCountPattern.size(), lineLength - vertexCountPattern.size());
+            vertexCount = atoi(vertexCountString.c_str());
+        }
+
+        std::getline(file, line);
+
+        // 获得三角形数:TriangleCount: 60339
+        position = line.find(triangleCountPattern);
+
+        if (position != std::string::npos) {
+            std::string triangleCountString = line.substr(triangleCountPattern.size(), lineLength - triangleCountPattern.size());
+            triangleCount = atoi(triangleCountString.c_str());
+        }
+
+        // VertexList (pos, normal)
+        std::getline(file, line);
+
+        // {
+        std::getline(file, line);
+
+        uint32_t counter = 0;
+
+        std::vector<std::string> vertexString;
+
+        while (counter < vertexCount) {
+            std::getline(file, line);
+
+            // 删除开头的\t制表符
+            line.erase(line.begin());            
+            split(line, " ", vertexString);
+            vertices.emplace_back(createVertex(vertexString));
+            vertexString.clear();
+            counter++;
+        }
+
+        // }
+        std::getline(file, line);
+
+        // TriangleList
+        std::getline(file, line);
+
+        // {
+        std::getline(file, line);
+        
+        counter = 0;
+
+        std::vector<std::string> indexString;
+
+        while (counter < triangleCount) {
+            std::getline(file, line);
+
+            // 删除开头的\t制表符
+            line.erase(line.begin());
+            
+            split(line, " ", indexString);
+            indices.emplace_back(atoi(indexString[0].c_str()));
+            indices.emplace_back(atoi(indexString[1].c_str()));
+            indices.emplace_back(atoi(indexString[2].c_str()));
+            indexString.clear();
+            counter++;
+        }
+
+    }
+
+    GeometryGenerator::MeshData meshData;
+    meshData.Vertices = vertices;
+    meshData.Indices32 = indices;
+
+    return meshData;
+}
+
 void LandAndWaves::buildShapeGeometry() {
     GeometryGenerator geometryGenerator;
 
-    GeometryGenerator::MeshData box = geometryGenerator.CreateBox(1.0f, 1.0f, 1.0f, 0);
-    GeometryGenerator::MeshData grid = geometryGenerator.CreateGrid(160.0f, 160.0f, 50, 50);
-    GeometryGenerator::MeshData geometrySphere = geometryGenerator.CreateGeosphere(5.0f, 3);
+    auto box = geometryGenerator.CreateBox(1.0f, 1.0f, 1.0f, 0);
+    auto grid = geometryGenerator.CreateGrid(160.0f, 160.0f, 50, 50);
+    auto geometrySphere = geometryGenerator.CreateGeosphere(5.0f, 3);
+
+    auto skull = loadSkullMeshData();
 
     // 将所有的结合体数据都合并到一对大的顶点/索引缓冲区中
     // 以此来定义每个子网格数据在缓冲区中所占的范围
@@ -931,11 +1108,13 @@ void LandAndWaves::buildShapeGeometry() {
     uint32_t boxVertexOffset = 0;
     uint32_t gridVertexOffset = boxVertexOffset + static_cast<uint32_t>(box.Vertices.size());
     uint32_t geometrySphereVertexOffset = gridVertexOffset + static_cast<uint32_t>(grid.Vertices.size());
+    uint32_t skullVertexOffset = geometrySphereVertexOffset + static_cast<uint32_t>(geometrySphere.Vertices.size());
 
     // 对合并索引缓冲区中的每个物体的起始索引进行缓存
     uint32_t boxIndexOffset = 0;
     uint32_t gridIndexOffset = boxIndexOffset + static_cast<uint32_t>(box.Indices32.size());
     uint32_t geometrySphereIndexOffset = gridIndexOffset + static_cast<uint32_t>(grid.Indices32.size());
+    uint32_t skullIndexOffset = geometrySphereIndexOffset + static_cast<uint32_t>(geometrySphere.Indices32.size());
 
     // 定义多个SubmeshGeometry结构体中包含了顶点/索引缓冲区内不同几何体的子网格数据
     SubmeshGeometry boxSubmesh;
@@ -953,8 +1132,13 @@ void LandAndWaves::buildShapeGeometry() {
     geometrySphereMesh.StartIndexLocation = geometrySphereIndexOffset;
     geometrySphereMesh.BaseVertexLocation = geometrySphereVertexOffset;
 
+    SubmeshGeometry skullMesh;
+    skullMesh.IndexCount = static_cast<uint32_t>(skull.Indices32.size());
+    skullMesh.StartIndexLocation = skullIndexOffset;
+    skullMesh.BaseVertexLocation = skullVertexOffset;
+
     // 提取出所需的顶点元素，再将所有网格的顶点装进一个顶点缓冲区
-    auto totalVertexCount = box.Vertices.size() + grid.Vertices.size() + geometrySphere.Vertices.size();
+    auto totalVertexCount = box.Vertices.size() + grid.Vertices.size() + geometrySphere.Vertices.size() + skull.Vertices.size();
 
     std::vector<FrameUtil::Vertex> vertices(totalVertexCount);
 
@@ -1001,11 +1185,19 @@ void LandAndWaves::buildShapeGeometry() {
         vertices[k].uv = geometrySphere.Vertices[i].TexC;
     }
 
+    for (size_t i = 0; i < skull.Vertices.size(); ++i, ++k) {
+        vertices[k].position = skull.Vertices[i].Position;
+        XMFLOAT3 normal = skull.Vertices[i].Normal;
+        vertices[k].color = XMFLOAT4(normal.x, normal.y, normal.z, 1.0f);
+        vertices[k].uv = skull.Vertices[i].TexC;
+    }
+
     std::vector<std::uint32_t> indices;
 
     indices.insert(indices.end(), box.Indices32.begin(), box.Indices32.end());
     indices.insert(indices.end(), grid.Indices32.begin(), grid.Indices32.end());
     indices.insert(indices.end(), geometrySphere.Indices32.begin(), geometrySphere.Indices32.end());
+    indices.insert(indices.end(), skull.Indices32.begin(), skull.Indices32.end());
 
     const uint32_t vertexBufferByteSize = (uint32_t)vertices.size() * sizeof(FrameUtil::Vertex);
     const uint32_t indexBufferByteSize = (uint32_t)indices.size() * sizeof(std::uint32_t);
@@ -1034,6 +1226,7 @@ void LandAndWaves::buildShapeGeometry() {
     geometry->DrawArgs["Box"] = boxSubmesh;
     geometry->DrawArgs["Land"] = gridSubmesh;
     geometry->DrawArgs["Sphere"] = geometrySphereMesh;
+    geometry->DrawArgs["Skull"] = skullMesh;
 
     geometries[geometry->Name] = std::move(geometry);
 }
@@ -1089,9 +1282,9 @@ void LandAndWaves::buildWavesGeometryBuffers() {
     geometries["WaterGeometry"] = std::move(geometry);
 }
 
-std::unique_ptr<FrameUtil::RenderItem> LandAndWaves::createRenderItem(uint32_t objectConstantBufferIndex, MeshGeometry* geometry, const std::string& name) {
+std::unique_ptr<FrameUtil::RenderItem> LandAndWaves::createRenderItem(const XMMATRIX& world, uint32_t objectConstantBufferIndex, MeshGeometry* geometry, const std::string& name) {
     auto renderItem = std::make_unique<FrameUtil::RenderItem>();
-    renderItem->world = MathHelper::Identity4x4();
+    XMStoreFloat4x4(&renderItem->world, world);
     renderItem->objectConstantBufferIndex = objectConstantBufferIndex;
     renderItem->geometry = geometry;
     renderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
@@ -1107,15 +1300,7 @@ void LandAndWaves::buildRenderItems() {
 
     auto shapeGeometry = geometries["ShapeGeometry"].get();
 
-    boxRenderItem = createRenderItem(0, shapeGeometry, "Box");
-
-    // XMStoreFloat4x4(&boxRenderItem->world, XMMatrixScaling(1.1f, 1.1f, 1.1f) * XMMatrixTranslation(0.0f, 0.0f, 0.0f));
-    // boxRenderItem->objectConstantBufferIndex = 0;
-    // boxRenderItem->geometry = geometries["ShapeGeometry"].get();
-    // boxRenderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-    // boxRenderItem->indexCount = boxRenderItem->geometry->DrawArgs["Box"].IndexCount;
-    // boxRenderItem->startIndexLocation = boxRenderItem->geometry->DrawArgs["Box"].StartIndexLocation;
-    // boxRenderItem->baseVertexLocation = boxRenderItem->geometry->DrawArgs["Box"].BaseVertexLocation;
+    boxRenderItem = createRenderItem(XMMatrixIdentity(), 0, shapeGeometry, "Box");
 
     renderItemLayer[(int)RenderLayer::Opaque].push_back(boxRenderItem.get());
 
@@ -1156,10 +1341,15 @@ void LandAndWaves::buildRenderItems() {
 
     renderItemLayer[(int)RenderLayer::Opaque].push_back(geometrySphereRenderItem.get());
 
+    auto skullRenderItem = createRenderItem(XMMatrixTranslation(0.0f, 5.0f, 0.0f), 4, geometries["ShapeGeometry"].get(), "Skull");
+
+    renderItemLayer[(int)RenderLayer::Opaque].push_back(skullRenderItem.get());
+
     allRenderItems.push_back(std::move(boxRenderItem));
     allRenderItems.push_back(std::move(landRenderItem));
     allRenderItems.push_back(std::move(wavesRenderItem));
     allRenderItems.push_back(std::move(geometrySphereRenderItem));
+    allRenderItems.push_back(std::move(skullRenderItem));
 }
 
 void LandAndWaves::updateObjectConstantBuffers() {
@@ -1185,12 +1375,25 @@ void LandAndWaves::updateObjectConstantBuffers() {
 
 void LandAndWaves::updatePassConstantBuffers() {
    // 将球坐标转换为笛卡尔坐标
-    float x = radius * sinf(phi) * cosf(theta);
-    float z = radius * sinf(phi) * sinf(theta);
-    float y = radius * cosf(phi);
+   if (!isPan) {
+       // x = r * sinθ * cosφ
+       // y = r * sinθ * sinφ
+       // z = r * cosθ
+       // 上面公式对应的坐标轴朝向如下：
+       // +y轴朝右
+       // +z轴朝上
+       // +x轴朝向观察者
+       // 下面的算法是针对左手坐标系的，即：
+       // +x轴朝右
+       // +y轴朝上
+       // -z轴朝向观察者
+       cameraPosition.x = radius * sinf(phi) * cosf(theta);
+       cameraPosition.z = radius * sinf(phi) * sinf(theta);
+       cameraPosition.y = radius * cosf(phi);
+   }
 
     // 构建观察矩阵
-    XMVECTOR position = XMVectorSet(x, y, z, 1.0f);
+    XMVECTOR position = XMVectorSet(cameraPosition.x, cameraPosition.y, cameraPosition.z, 1.0f);
     XMVECTOR target = XMVectorZero();
     XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0);
 
