@@ -105,7 +105,7 @@ private:
     std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> graphicsPSOs;
     ComPtr<ID3D12PipelineState> computePSO;
 
-    int32_t objectCount = 1;
+    uint32_t objectCount = 1;
 
     XMFLOAT4X4 view = MathHelper::Identity4x4();
     XMFLOAT4X4 projection = MathHelper::Identity4x4();

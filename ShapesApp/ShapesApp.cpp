@@ -266,8 +266,6 @@ void shapesApp::createConstantBufferViews() {
 
     UINT objectConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(FrameUtil::ObjectConstants));
 
-    uint32_t objectCount = static_cast<uint32_t>(opaqueRenderItems.size());
-
     for (size_t frameResourcesIndex = 0; frameResourcesIndex < frameResourcesCount; frameResourcesIndex++) {
         
         for (size_t objectIndex = 0; objectIndex < objectCount; objectIndex++) {
