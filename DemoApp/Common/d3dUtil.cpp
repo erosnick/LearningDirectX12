@@ -193,7 +193,7 @@ void d3dUtil::loadShader(const std::string& binaryName, std::string& shaderData)
     file.seekg(0, std::ios_base::end);
 
     // 获取文件大小(byte)
-    int length = file.tellg();
+    std::streampos length = file.tellg();
 
     // 移动文件指针到文件开始
     file.seekg(0, std::ios_base::beg);

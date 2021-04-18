@@ -43,13 +43,17 @@ protected:
     void createShaderResourceView();
     void createRootSignature();
     void createShadersAndInputLayout();
-    void createBoxGeometry();
+    void createShapeGeometries();
+    void createRenderItems();
     void createPipelineStateOjbect();
 
     void loadResources();
 
     void prepareFrameResourceSync();
     void frameResourceSync();
+
+    void updateObjectConstantBuffers();
+    void updatePassConstantBuffers();
 
     void initImGUI(); 
 	void buildImGuiWidgets();
@@ -61,7 +65,7 @@ private:
     ComPtr<ID3D12RootSignature> rootSignature = nullptr;
     ComPtr<ID3D12DescriptorHeap> CBVDescriptorHeap = nullptr;
     ComPtr<ID3D12DescriptorHeap> SRVDescriptorHeap = nullptr;
-    std::unique_ptr<MeshGeometry> boxGeometry = nullptr;
+    std::unique_ptr<MeshGeometry> shapeGeometry = nullptr;
 
     // ComPtr<ID3DBlob> vertexShaderByteCode = nullptr;
     // ComPtr<ID3DBlob> pixelShaderByteCode = nullptr;
@@ -81,11 +85,13 @@ private:
 
     FrameResources* currentFrameResource;
 
-    const int32_t objectCount = 1;
+    std::vector<RenderItem*> renderItems;
+    std::vector<std::unique_ptr<RenderItem>> allRenderItems;
+
+    uint32_t objectCount = 1;
 
     ComPtr<ID3D12PipelineState> pipelineStateObject = nullptr;
 
-    XMFLOAT4X4 world = MathHelper::Identity4x4();
     XMFLOAT4X4 view = MathHelper::Identity4x4();
     XMFLOAT4X4 projection = MathHelper::Identity4x4();
 

@@ -19,7 +19,41 @@ struct Vertex {
 
 // 单个物体的物体常量数据(不变的)
 struct ObjectConstants {
-    XMFLOAT4X4 worldViewProjection = MathHelper::Identity4x4(); 
+    XMFLOAT4X4 world = MathHelper::Identity4x4(); 
+};
+
+struct PassConstants {
+	XMFLOAT4X4 viewProjection = MathHelper::Identity4x4();
+};
+
+struct RenderItem {
+	RenderItem() = default;
+
+	// 描述物体局部空间相对于世界空间的世界矩阵
+	// 它定义了物体位于世界空间中的位置、朝向以及大小
+	XMFLOAT4X4 world = MathHelper::Identity4x4();
+
+	// 用已更新标志(dirty flag)来表示物体的相关数据已发生改变
+	// 这意味着我们此时需要更新常量缓冲区。由于每个FrameResource
+	// 中都有一个物体常量缓冲区，所以我们必须对每个FrameResource
+	// 都进行更新。即，当我们修改物体数据的时候，应当按
+	// NumFramesDirty = numFrameResources进行设置，
+	// 从而使每个帧资源都得到更新
+	int numFramesDirty = 3;
+
+	// 该索引指向的GPU常量缓冲区对应于当前渲染项中的物体常量缓冲区
+	uint32_t objectConstantBufferIndex = -1;
+
+	// 此渲染杂项参与绘制的几何体。注意，绘制一个几何体可能会用到多个渲染项
+	MeshGeometry* geometry = nullptr;
+
+	// 图元拓扑
+	D3D12_PRIMITIVE_TOPOLOGY primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+
+	// DrawIndexedInstanced方法的参数
+	uint32_t indexCount = 0;
+	uint32_t startIndexLocation = 0;
+	int32_t baseVertexLocation = 0;
 };
 
 // 为了改进之前CPU和GPU互相等待的低效实现, 让CPU连续处理3帧的绘制命令，
@@ -29,7 +63,7 @@ struct ObjectConstants {
 // 而3帧的命令储备相当于一个3个帧资源元素的环形 数组，随着GPU的进程，CPU不断更新环形数组中的数据元素。
 class FrameResources {
 public:
-    FrameResources(ID3D12Device* device, uint32_t objectCount);
+    FrameResources(ID3D12Device* device, uint32_t objectCount, uint32_t passCount);
     FrameResources(const FrameResources& rhs) = delete;
     FrameResources& operator=(const FrameResources& rhs) = delete;
 
@@ -40,6 +74,7 @@ public:
     // 在GPU执行完引用此常量缓冲区的命令之前，我们不能对它进行更新
     // 因此每一帧都要有它们自己的常量缓冲区
     std::unique_ptr<UploadBuffer<ObjectConstants>> objectConstantBuffer = nullptr;
+	std::unique_ptr<UploadBuffer<PassConstants>> passConstantBuffer = nullptr;
 
     // 通过围栏值将命令标记到此围栏点，这使我们可以检测到GPU是否还在使用这些帧资源
     uint64_t fenceValue = 0;

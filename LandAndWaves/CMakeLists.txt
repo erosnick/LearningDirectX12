@@ -10,7 +10,7 @@ set(CMAKE_C_FLAGS /source-charset:utf-8)
 
 add_executable(${PROJECT_NAME} WIN32 
     main.cpp 
-    d3dApp.cpp 
+    d3dApp.cpp
     LandAndWaves.cpp
     Waves.cpp
     ./Common/lodepng.cpp
@@ -55,4 +55,5 @@ endif()
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
+set_property(TARGET LandAndWaves PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 include(CPack)

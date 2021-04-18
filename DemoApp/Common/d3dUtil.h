@@ -196,22 +196,22 @@ struct MeshGeometry
 
 	D3D12_VERTEX_BUFFER_VIEW VertexBufferView()const
 	{
-		D3D12_VERTEX_BUFFER_VIEW vbv;
-		vbv.BufferLocation = VertexBufferGPU->GetGPUVirtualAddress();
-		vbv.StrideInBytes = VertexByteStride;
-		vbv.SizeInBytes = VertexBufferByteSize;
+		D3D12_VERTEX_BUFFER_VIEW vertexBufferView;
+		vertexBufferView.BufferLocation = VertexBufferGPU->GetGPUVirtualAddress();
+		vertexBufferView.StrideInBytes = VertexByteStride;
+		vertexBufferView.SizeInBytes = VertexBufferByteSize;
 
-		return vbv;
+		return vertexBufferView;
 	}
 
 	D3D12_INDEX_BUFFER_VIEW IndexBufferView()const
 	{
-		D3D12_INDEX_BUFFER_VIEW ibv;
-		ibv.BufferLocation = IndexBufferGPU->GetGPUVirtualAddress();
-		ibv.Format = IndexFormat;
-		ibv.SizeInBytes = IndexBufferByteSize;
+		D3D12_INDEX_BUFFER_VIEW indexBufferView;
+        indexBufferView.BufferLocation = IndexBufferGPU->GetGPUVirtualAddress();
+        indexBufferView.Format = IndexFormat;
+        indexBufferView.SizeInBytes = IndexBufferByteSize;
 
-		return ibv;
+		return indexBufferView;
 	}
 
 	// We can free this memory after we finish upload to the GPU.
@@ -241,7 +241,7 @@ struct MaterialConstants
 	float Roughness = 0.25f;
 
 	// Used in texture mapping.
-	DirectX::XMFLOAT4X4 MatTransform = MathHelper::Identity4x4();
+	DirectX::XMFLOAT4X4 MaterialTransform = MathHelper::Identity4x4();
 };
 
 // Simple struct to represent a material for our demos.  A production 3D engine
@@ -252,7 +252,7 @@ struct Material
 	std::string Name;
 
 	// Index into constant buffer corresponding to this material.
-	int MatCBIndex = -1;
+	int MaterialCBIndex = -1;
 
 	// Index into SRV heap for diffuse texture.
 	int DiffuseSrvHeapIndex = -1;
@@ -270,7 +270,7 @@ struct Material
 	DirectX::XMFLOAT4 DiffuseAlbedo = { 1.0f, 1.0f, 1.0f, 1.0f };
 	DirectX::XMFLOAT3 FresnelR0 = { 0.01f, 0.01f, 0.01f };
 	float Roughness = .25f;
-	DirectX::XMFLOAT4X4 MatTransform = MathHelper::Identity4x4();
+	DirectX::XMFLOAT4X4 MaterialTransform = MathHelper::Identity4x4();
 };
 
 struct Texture

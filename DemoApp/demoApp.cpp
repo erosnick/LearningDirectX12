@@ -1,6 +1,7 @@
 ﻿#include "demoApp.h"
 #include "Common/d3dUtil.h"
 #include "Common/WICUtils.h"
+#include "Common/GeometryGenerator.h"
 #include <DirectXColors.h>
 
 #include "imgui/imgui_impl_win32.h"
@@ -39,6 +40,8 @@ bool demoApp::initialize() {
         return false;
     }
 
+    createShapeGeometries();
+    createRenderItems();
     createCBVSRVDescriptorHeaps();
     createFrameResources();
     loadResources();
@@ -46,7 +49,6 @@ bool demoApp::initialize() {
     createConstantBufferViews();
     createRootSignature();
     createShadersAndInputLayout();
-    createBoxGeometry();
     createPipelineStateOjbect();
 
     initImGUI();
@@ -80,73 +82,8 @@ void demoApp::onResize() {
 void demoApp::update(float delta) {
     frameResourceSync();
 
-    // 将球坐标转换为笛卡尔坐标
-    float x = radius * sinf(phi) * cosf(theta);
-    float z = radius * sinf(phi) * sinf(theta);
-    float y = radius * cosf(phi);
-
-    // 构建观察矩阵
-    XMVECTOR position = XMVectorSet(x, y, z, 1.0f);
-    XMVECTOR target = XMVectorZero();
-    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0);
-
-    XMVECTOR forward = XMVectorSubtract(target, position);
-    forward = XMVector3Normalize(forward);
-
-    XMVECTOR right = XMVector3Cross(up, forward);
-
-    right = XMVector3Normalize(right);
-
-    up = XMVector3Cross(forward, right);
-
-    XMFLOAT4 tempRight;
-    XMStoreFloat4(&tempRight, right);
-
-    XMFLOAT4 tempUp;
-    XMStoreFloat4(&tempUp, up);
-
-    XMFLOAT4 tempForward;
-    XMStoreFloat4(&tempForward, forward);
-
-    XMMATRIX newView = XMMatrixIdentity();
-    // XMMATRIX newView = XMMatrixLookAtLH(position, target, up);
-
-    newView.r[0] = XMVectorSet(tempRight.x, tempUp.x, tempForward.x, 0.0f);
-    newView.r[1] = XMVectorSet(tempRight.y, tempUp.y, tempForward.y, 0.0f);
-    newView.r[2] = XMVectorSet(tempRight.z, tempUp.z, tempForward.z, 0.0f);
-    
-    float tx = -XMVectorGetX(XMVector3Dot(position, right));
-    float ty = -XMVectorGetX(XMVector3Dot(position, up));
-    float tz = -XMVectorGetX(XMVector3Dot(position, forward));
-
-    newView.r[3] = XMVectorSet(tx, ty, tz, 1.0f);
-
-    XMStoreFloat4x4(&view, newView);
-
-    world.m[3][0] = 0.0f;
-    world.m[3][1] = 0.0f;
-    world.m[3][2] = 0.0f;
-
-    XMMATRIX newWorld1 = XMLoadFloat4x4(&world);
-
-    world.m[3][0] = 2.0f;
-    world.m[3][1] = 0.0f;
-    world.m[3][2] = 0.0f;
-
-    XMMATRIX newWorld2 = XMLoadFloat4x4(&world);
-
-    XMMATRIX newProjection = XMLoadFloat4x4(&projection);
-    XMMATRIX newWorldViewProjection = newWorld1 * newView * newProjection;
-
-    // 用当前最新的worldViewProject矩阵来更新常量缓冲区
-    ObjectConstants objectConstants;
-    XMStoreFloat4x4(&objectConstants.worldViewProjection, XMMatrixTranspose(newWorldViewProjection));
-    currentFrameResource->objectConstantBuffer->CopyData(0, objectConstants);
-
-    // newWorldViewProjection = newWorld2 * newView * newProjection;
-
-    // XMStoreFloat4x4(&objectConstants.worldViewProjection, XMMatrixTranspose(newWorldViewProjection));
-    // currentFrameResource->objectConstantBuffer->CopyData(1, objectConstants);
+    updateObjectConstantBuffers();
+    updatePassConstantBuffers();
 
     updateImGui();
 	buildImGuiWidgets();
@@ -185,24 +122,40 @@ void demoApp::draw(float delta) {
     commandList->SetGraphicsRootSignature(rootSignature.Get());
 
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    commandList->IASetVertexBuffers(0, 1, &boxGeometry->VertexBufferView());
-    commandList->IASetIndexBuffer(&boxGeometry->IndexBufferView());
+    //commandList->IASetVertexBuffers(0, 1, &shapeGeometry->VertexBufferView());
+    //commandList->IASetIndexBuffer(&shapeGeometry->IndexBufferView());
 
-    uint32_t offset = frameResourcesCount * objectCount + 1;
+    uint32_t SRVDescriptorHeapIndex = frameResourcesCount * (objectCount + 1);
 
-    CD3DX12_GPU_DESCRIPTOR_HANDLE SRVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), offset, CBVSRVUAVDescriptorSize);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE SRVDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
-    for (int32_t objectIndex = 0; objectIndex < objectCount; objectIndex++) {
+    SRVDescriptorHandle.Offset(SRVDescriptorHeapIndex, CBVSRVUAVDescriptorSize);
+
+    uint32_t passCBDescriptorHeapIndex = objectCount + currentFrameIndex * (objectCount + 1);
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE passCBDescriptorHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+    passCBDescriptorHandle.Offset(passCBDescriptorHeapIndex, CBVSRVUAVDescriptorSize);
+
+    for (uint32_t renderItemIndex = 0; renderItemIndex < allRenderItems.size(); renderItemIndex++) {
         CD3DX12_GPU_DESCRIPTOR_HANDLE CBVDescriptorHeapHandle(CBVDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
-        int32_t descriptorHeapIndex = currentFrameIndex * objectCount + objectIndex;
+        uint32_t descriptorHeapIndex = currentFrameIndex * (objectCount + 1) + renderItemIndex;
 
         CBVDescriptorHeapHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
         commandList->SetGraphicsRootDescriptorTable(0, CBVDescriptorHeapHandle);
+
+		commandList->SetGraphicsRootDescriptorTable(1, passCBDescriptorHandle);
+
         commandList->SetGraphicsRootDescriptorTable(2, SRVDescriptorHandle);
 
-        commandList->DrawIndexedInstanced(boxGeometry->DrawArgs["Box"].IndexCount, 1, 0, 0, 0);
+        auto renderItem = allRenderItems[renderItemIndex].get();
+
+        commandList->IASetVertexBuffers(0, 1, &renderItem->geometry->VertexBufferView());
+        commandList->IASetIndexBuffer(&renderItem->geometry->IndexBufferView());
+
+        commandList->DrawIndexedInstanced(renderItem->indexCount, 1, renderItem->startIndexLocation, renderItem->baseVertexLocation, 0);
     }
 
     commandList->SetDescriptorHeaps(1, SRVDescriptorHeap.GetAddressOf());
@@ -283,8 +236,9 @@ void demoApp::onKeyUp(WPARAM btnState) {
 }
 
 void demoApp::createCBVSRVDescriptorHeaps() {
+    objectCount = static_cast<uint32_t>(allRenderItems.size());
     D3D12_DESCRIPTOR_HEAP_DESC CBVDescriptorHeapDesc;
-    CBVDescriptorHeapDesc.NumDescriptors = frameBackBufferCount * objectCount + 2;
+    CBVDescriptorHeapDesc.NumDescriptors = frameResourcesCount * (objectCount + 1) + 1;
     CBVDescriptorHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     CBVDescriptorHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     CBVDescriptorHeapDesc.NodeMask = 0;
@@ -300,36 +254,53 @@ void demoApp::createCBVSRVDescriptorHeaps() {
 
 void demoApp::createFrameResources() {
     for (int frameResourceIndex = 0; frameResourceIndex < frameBackBufferCount; frameResourceIndex++) {
-        frameResources.push_back(std::make_unique<FrameResources>(device.Get(), objectCount));
+        frameResources.push_back(std::make_unique<FrameResources>(device.Get(), objectCount, 1));
     }
 }
 
 void demoApp::createConstantBufferViews() {
 
-    UINT constantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+    uint32_t objectConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+    uint32_t passConstantBufferSize = d3dUtil::CalcConstantBufferByteSize(sizeof(PassConstants));
 
     for (uint32_t frameResourcesIndex = 0; frameResourcesIndex < frameResourcesCount; frameResourcesIndex++) {
-        
-        for (int32_t objectIndex = 0; objectIndex < objectCount; objectIndex++) {
-            auto& objectConstantBuffer = frameResources[frameResourcesIndex]->objectConstantBuffer;
+        for (uint32_t objectIndex = 0; objectIndex < objectCount; objectIndex++) {
             
-            D3D12_GPU_VIRTUAL_ADDRESS constantBufferAddress = objectConstantBuffer->Resource()->GetGPUVirtualAddress();
+            auto& objectConstantBuffer = frameResources[frameResourcesIndex]->objectConstantBuffer;
+
+            D3D12_GPU_VIRTUAL_ADDRESS objectConstantBufferAddress = objectConstantBuffer->Resource()->GetGPUVirtualAddress();
 
             // 偏移到常量缓冲区中第i个物体所对应的常量数据
-            constantBufferAddress += objectIndex * constantBufferSize;
+            objectConstantBufferAddress += objectIndex * objectConstantBufferSize;
 
-            CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+            CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
-            int32_t descriptorHeapIndex = frameResourcesIndex * objectCount + objectIndex;
+            uint32_t objectCBDescriptorHeapIndex = frameResourcesIndex * (objectCount + 1) + objectIndex;
 
-            CBVDescriptorHandle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
+            CBVDescriptorHandle.Offset(objectCBDescriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
-            D3D12_CONSTANT_BUFFER_VIEW_DESC constantBufferViewDesc;
-            constantBufferViewDesc.BufferLocation = constantBufferAddress;
-            constantBufferViewDesc.SizeInBytes = constantBufferSize;
+            D3D12_CONSTANT_BUFFER_VIEW_DESC objectConstantBufferViewDesc;
+            objectConstantBufferViewDesc.BufferLocation = objectConstantBufferAddress;
+            objectConstantBufferViewDesc.SizeInBytes = objectConstantBufferSize;
 
-            device->CreateConstantBufferView(&constantBufferViewDesc, CBVDescriptorHandle);
+            device->CreateConstantBufferView(&objectConstantBufferViewDesc, CBVDescriptorHandle);
         }
+
+        auto& passConstantBuffer = frameResources[frameResourcesIndex]->passConstantBuffer;
+        
+        D3D12_GPU_VIRTUAL_ADDRESS passConstantBufferAddress = passConstantBuffer->Resource()->GetGPUVirtualAddress();
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+        uint32_t passCBDescriptorHeapIndex = objectCount + frameResourcesIndex * (objectCount + 1);
+
+        CBVDescriptorHandle.Offset(passCBDescriptorHeapIndex, CBVSRVUAVDescriptorSize);
+
+        D3D12_CONSTANT_BUFFER_VIEW_DESC passConstantBufferDesc;
+        passConstantBufferDesc.BufferLocation = passConstantBufferAddress;
+        passConstantBufferDesc.SizeInBytes = passConstantBufferSize;
+
+        device->CreateConstantBufferView(&passConstantBufferDesc, CBVDescriptorHandle);
     }
 }
 
@@ -342,9 +313,11 @@ void demoApp::createShaderResourceView() {
     shaderResourceViewDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     shaderResourceViewDesc.Texture2D.MipLevels = 1;
 
-    uint32_t offset = frameResourcesCount * objectCount + 1;
+    uint32_t descriptorHeapIndex = frameResourcesCount * (objectCount + 1);
 
-    CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHeapHanle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart(), offset, CBVSRVUAVDescriptorSize);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHeapHanle(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+    CBVDescriptorHeapHanle.Offset(descriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
     device->CreateShaderResourceView(texture.Get(), &shaderResourceViewDesc, CBVDescriptorHeapHanle);
 }
@@ -394,25 +367,25 @@ void demoApp::createRootSignature() {
                                                              0,     // registerSpace
                       D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
 
-    CBVDescriptorTable[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV,     // rangeType
+	CBVDescriptorTable[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV,     // rangeType
+		                                                     1,     // numDescriptors
+		                                                     1,     // baseShaderRegister
+		                                                     0,     // registerSpace
+		              D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
+
+    CBVDescriptorTable[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV,     // rangeType
                                                              1,     // numDescriptors
                                                              0,     // baseShaderRegister
                                                              0,     // registerSpace
-                      D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
-
-    CBVDescriptorTable[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV,      // rangeType
-                                                             1,      // numDescriptors
-                                                             1,      // baseShaderRegister
-                                                             0,      // registerSpace
                       D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
 
     slotRootParameter[0].InitAsDescriptorTable(1, 
                                                &CBVDescriptorTable[0],
                                                D3D12_SHADER_VISIBILITY_VERTEX);
 
-    slotRootParameter[1].InitAsDescriptorTable(1, 
-                                               &CBVDescriptorTable[1],
-                                               D3D12_SHADER_VISIBILITY_PIXEL);
+	slotRootParameter[1].InitAsDescriptorTable(1,
+		                                       &CBVDescriptorTable[1],
+		                                        D3D12_SHADER_VISIBILITY_VERTEX);
 
     slotRootParameter[2].InitAsDescriptorTable(1,                                 // numDescriptorRanges
                                                &CBVDescriptorTable[2],            // pDescriptorRanges
@@ -427,7 +400,7 @@ void demoApp::createRootSignature() {
 
     D3D12_STATIC_SAMPLER_DESC samplerDesc;
 
-    samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
     samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
     samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
@@ -479,112 +452,171 @@ void demoApp::createShadersAndInputLayout() {
     };
 }
 
-void demoApp::createBoxGeometry() {
-    std::array<Vertex, 24> vertices = 
-    {
-        // Front face
-        Vertex({XMFLOAT3(-0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
-        Vertex({XMFLOAT3( 0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::Black), XMFLOAT2(1.0f, 1.0f)}),
-        Vertex({XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::Red),   XMFLOAT2(0.0f, 1.0f)}),
-        Vertex({XMFLOAT3( 0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::Green), XMFLOAT2(1.0f, 0.0f)}),
+void demoApp::createShapeGeometries() {
+    //std::vector<Vertex> vertices = 
+    //{
+    //    // Front face
+    //    Vertex({XMFLOAT3(-0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
+    //    Vertex({XMFLOAT3( 0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::Black), XMFLOAT2(1.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::Red),   XMFLOAT2(0.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3( 0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::Green), XMFLOAT2(1.0f, 0.0f)}),
 
-        // Right side face
-        Vertex({XMFLOAT3(0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::Blue),    XMFLOAT2(0.0f, 1.0f)}),
-        Vertex({XMFLOAT3(0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::Yellow),  XMFLOAT2(1.0f, 0.0f)}),
-        Vertex({XMFLOAT3(0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::Cyan),    XMFLOAT2(1.0f, 1.0f)}),
-        Vertex({XMFLOAT3(0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::Magenta), XMFLOAT2(0.0f, 0.0f)}),
+    //    // Right side face
+    //    Vertex({XMFLOAT3(0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::Blue),    XMFLOAT2(0.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3(0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::Yellow),  XMFLOAT2(1.0f, 0.0f)}),
+    //    Vertex({XMFLOAT3(0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::Cyan),    XMFLOAT2(1.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3(0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::Magenta), XMFLOAT2(0.0f, 0.0f)}),
 
-        // Left side face
-        Vertex({XMFLOAT3(-0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
-        Vertex({XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 1.0f)}),
-        Vertex({XMFLOAT3(-0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 1.0f)}),
-        Vertex({XMFLOAT3(-0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 0.0f)}),
+    //    // Left side face
+    //    Vertex({XMFLOAT3(-0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
+    //    Vertex({XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3(-0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3(-0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 0.0f)}),
 
-        // Back face
-        Vertex({XMFLOAT3( 0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
-        Vertex({XMFLOAT3(-0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 1.0f)}),
-        Vertex({XMFLOAT3( 0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 1.0f)}),
-        Vertex({XMFLOAT3(-0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 0.0f)}),
+    //    // Back face
+    //    Vertex({XMFLOAT3( 0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
+    //    Vertex({XMFLOAT3(-0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3( 0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3(-0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 0.0f)}),
 
-        // Top face
-        Vertex({XMFLOAT3(-0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 1.0f)}),
-        Vertex({XMFLOAT3( 0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 0.0f)}),
-        Vertex({XMFLOAT3( 0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 1.0f)}),
-        Vertex({XMFLOAT3(-0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
+    //    // Top face
+    //    Vertex({XMFLOAT3(-0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3( 0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 0.0f)}),
+    //    Vertex({XMFLOAT3( 0.5f,  0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3(-0.5f,  0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
 
-        // Bttom faceX
-        Vertex({XMFLOAT3( 0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
-        Vertex({XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 1.0f)}),
-        Vertex({XMFLOAT3( 0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 1.0f)}),
-        Vertex({XMFLOAT3(-0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 0.0f)})
-    };
+    //    // Bottom faceX
+    //    Vertex({XMFLOAT3( 0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 0.0f)}),
+    //    Vertex({XMFLOAT3(-0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3( 0.5f, -0.5f, -0.5f), XMFLOAT4(Colors::White), XMFLOAT2(0.0f, 1.0f)}),
+    //    Vertex({XMFLOAT3(-0.5f, -0.5f,  0.5f), XMFLOAT4(Colors::White), XMFLOAT2(1.0f, 0.0f)})
+    //};
 
-    std::array<std::uint16_t, 36> indices = 
-    {
-        // Front face
-        0, 1, 2,
-        0, 3, 1,
+    //std::vector<std::uint32_t> indices = 
+    //{
+    //    // Front face
+    //    0, 1, 2,
+    //    0, 3, 1,
 
-        // Left face
-        4, 5, 6,
-        4, 7, 5,
+    //    // Left face
+    //    4, 5, 6,
+    //    4, 7, 5,
 
-        // Right face
-        8, 9, 10, //
-        8, 11, 9, //
+    //    // Right face
+    //    8, 9, 10, //
+    //    8, 11, 9, //
 
-        // Back face
-        12, 13, 14, 
-        12, 15, 13, 
+    //    // Back face
+    //    12, 13, 14, 
+    //    12, 15, 13, 
 
-        // Top face
-        16, 17, 18, 
-        16, 19, 17, 
+    //    // Top face
+    //    16, 17, 18, 
+    //    16, 19, 17, 
 
-        // Bottom face
-        20, 21, 22, 
-        20, 23, 21, 
-    };
+    //    // Bottom face
+    //    20, 21, 22, 
+    //    20, 23, 21, 
+    //};
 
-    const UINT vertexBufferByteSize = (UINT)vertices.size() * sizeof(Vertex);
-    const UINT indexBufferByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
+    GeometryGenerator geometryGenerator;
+    GeometryGenerator::MeshData box = geometryGenerator.CreateBox(1.0f, 1.0f, 1.0f, 0);
+    GeometryGenerator::MeshData grid = geometryGenerator.CreateGrid(10.0f, 10.0f, 10, 10);
 
-    boxGeometry = std::make_unique<MeshGeometry>();
-    boxGeometry->Name = "BoxGeometry";
+    uint32_t boxIndexOffset = 0;
+    uint32_t gridIndexOffset = boxIndexOffset + static_cast<uint32_t>(box.Indices32.size());
 
-    ThrowIfFailed(D3DCreateBlob(vertexBufferByteSize, &boxGeometry->VertexBufferCPU));
-    CopyMemory(boxGeometry->VertexBufferCPU->GetBufferPointer(),
+    uint32_t boxVertexOffset = 0;
+    uint32_t gridVertexOffset = boxVertexOffset + static_cast<uint32_t>(box.Vertices.size());
+
+	std::vector<Vertex> vertices(box.Vertices.size() + grid.Vertices.size());
+	std::vector<uint32_t> indices;
+
+    uint32_t k = 0;
+    for (size_t i = 0; i < box.Vertices.size(); i++, k++) {
+        vertices[k].position = box.Vertices[i].Position;
+        vertices[k].uv = box.Vertices[i].TexC;
+    }
+    
+	for (size_t i = 0; i < grid.Vertices.size(); i++, k++) {
+		vertices[k].position = grid.Vertices[i].Position;
+		vertices[k].uv = grid.Vertices[i].TexC;
+	}
+
+    indices.insert(indices.end(), box.Indices32.begin(), box.Indices32.end());
+    indices.insert(indices.end(), grid.Indices32.begin(), grid.Indices32.end());
+
+    const uint32_t vertexBufferByteSize = static_cast<uint32_t>(vertices.size()) * sizeof(Vertex);
+    const uint32_t indexBufferByteSize = static_cast<uint32_t>(indices.size()) * sizeof(std::uint32_t);
+
+    shapeGeometry = std::make_unique<MeshGeometry>();
+    shapeGeometry->Name = "ShapeGeometry";
+
+    ThrowIfFailed(D3DCreateBlob(vertexBufferByteSize, &shapeGeometry->VertexBufferCPU));
+    CopyMemory(shapeGeometry->VertexBufferCPU->GetBufferPointer(),
     vertices.data(), vertexBufferByteSize);
 
-    ThrowIfFailed(D3DCreateBlob(indexBufferByteSize, &boxGeometry->IndexBufferCPU));
-    CopyMemory(boxGeometry->IndexBufferCPU->GetBufferPointer(),
+    ThrowIfFailed(D3DCreateBlob(indexBufferByteSize, &shapeGeometry->IndexBufferCPU));
+    CopyMemory(shapeGeometry->IndexBufferCPU->GetBufferPointer(),
     indices.data(), indexBufferByteSize);
 
     // 重置命令列表为执行初始化命令做好准备工作
     ThrowIfFailed(commandList->Reset(commandAllocator.Get(), nullptr));
 
-    boxGeometry->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(), commandList.Get(),
-    vertices.data(), vertexBufferByteSize, boxGeometry->VertexBufferUploader);
+    shapeGeometry->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(), commandList.Get(),
+    vertices.data(), vertexBufferByteSize, shapeGeometry->VertexBufferUploader);
 
-    boxGeometry->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(), commandList.Get(),
-    indices.data(), indexBufferByteSize, boxGeometry->IndexBufferUploader);
+    shapeGeometry->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(device.Get(), commandList.Get(),
+    indices.data(), indexBufferByteSize, shapeGeometry->IndexBufferUploader);
 
     // 执行初始化命令
     ThrowIfFailed(commandList->Close());
     ID3D12CommandList* commandLists[] = {commandList.Get()};
     commandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
 
-    boxGeometry->VertexByteStride = sizeof(Vertex);
-    boxGeometry->VertexBufferByteSize = vertexBufferByteSize;
-    boxGeometry->IndexFormat = DXGI_FORMAT_R16_UINT;
-    boxGeometry->IndexBufferByteSize = indexBufferByteSize;
+    shapeGeometry->VertexByteStride = sizeof(Vertex);
+    shapeGeometry->VertexBufferByteSize = vertexBufferByteSize;
+    shapeGeometry->IndexFormat = DXGI_FORMAT_R32_UINT;
+    shapeGeometry->IndexBufferByteSize = indexBufferByteSize;
 
-    SubmeshGeometry submesh;
-    submesh.IndexCount = (UINT)indices.size();
-    submesh.StartIndexLocation = 0;
-    submesh.BaseVertexLocation = 0;
+    SubmeshGeometry boxMesh;
+    boxMesh.IndexCount = static_cast<uint32_t>(box.Indices32.size());
+    boxMesh.StartIndexLocation = boxIndexOffset;
+    boxMesh.BaseVertexLocation = boxVertexOffset;
 
-    boxGeometry->DrawArgs["Box"] = submesh;
+    shapeGeometry->DrawArgs["Box"] = boxMesh;
+
+    SubmeshGeometry gridMesh;
+    gridMesh.IndexCount = static_cast<uint32_t>(grid.Indices32.size());
+    gridMesh.StartIndexLocation = gridIndexOffset;
+    gridMesh.BaseVertexLocation = gridVertexOffset;
+
+    shapeGeometry->DrawArgs["Grid"] = gridMesh;
+}
+
+void demoApp::createRenderItems() {
+    auto boxRenderItem = std::make_unique<RenderItem>();
+
+    boxRenderItem->world = MathHelper::Identity4x4();
+    boxRenderItem->geometry = shapeGeometry.get();
+    boxRenderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    boxRenderItem->objectConstantBufferIndex = 0;
+    boxRenderItem->indexCount = shapeGeometry->DrawArgs["Box"].IndexCount;
+    boxRenderItem->startIndexLocation = shapeGeometry->DrawArgs["Box"].StartIndexLocation;
+    boxRenderItem->baseVertexLocation = shapeGeometry->DrawArgs["Box"].BaseVertexLocation;
+
+	auto gridRenderItem = std::make_unique<RenderItem>();
+
+	gridRenderItem->world = MathHelper::Identity4x4();
+	gridRenderItem->geometry = shapeGeometry.get();
+	gridRenderItem->primitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	gridRenderItem->objectConstantBufferIndex = 1;
+	gridRenderItem->indexCount = shapeGeometry->DrawArgs["Grid"].IndexCount;
+	gridRenderItem->startIndexLocation = shapeGeometry->DrawArgs["Grid"].StartIndexLocation;
+	gridRenderItem->baseVertexLocation = shapeGeometry->DrawArgs["Grid"].BaseVertexLocation;
+    
+    allRenderItems.push_back(std::move(boxRenderItem));
+    allRenderItems.push_back(std::move(gridRenderItem));
 }
 
 void demoApp::createPipelineStateOjbect() {
@@ -772,10 +804,83 @@ void demoApp::frameResourceSync() {
 
     if (currentFrameFenceValue != 0 && fence->GetCompletedValue() < currentFrameFenceValue) {
         HANDLE eventHandle = CreateEventEx(nullptr, false, false, EVENT_ALL_ACCESS);
-        ThrowIfFailed(fence->SetEventOnCompletion(currentFrameFenceValue, eventHandle));
-        WaitForSingleObject(eventHandle, INFINITE);
-        CloseHandle(eventHandle);
+
+        if (eventHandle != nullptr) {
+			ThrowIfFailed(fence->SetEventOnCompletion(currentFrameFenceValue, eventHandle));
+			WaitForSingleObject(eventHandle, INFINITE);
+			CloseHandle(eventHandle);
+        }
     }
+}
+
+void demoApp::updateObjectConstantBuffers() {
+    auto objectContantBuffer = currentFrameResource->objectConstantBuffer.get();
+
+    for (auto& element : allRenderItems) {
+        if (element->numFramesDirty > 0) {
+            XMMATRIX world = XMLoadFloat4x4(&element->world);
+
+            ObjectConstants objectContants;
+            XMStoreFloat4x4(&objectContants.world, XMMatrixTranspose(world));
+
+            objectContantBuffer->CopyData(element->objectConstantBufferIndex, objectContants);
+            
+            element->numFramesDirty--;
+        }
+    }
+}
+
+void demoApp::updatePassConstantBuffers() {
+	// 将球坐标转换为笛卡尔坐标
+	float x = radius * sinf(phi) * cosf(theta);
+	float z = radius * sinf(phi) * sinf(theta);
+	float y = radius * cosf(phi);
+
+	// 构建观察矩阵
+	XMVECTOR position = XMVectorSet(x, y, z, 1.0f);
+	XMVECTOR target = XMVectorZero();
+	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0);
+
+	XMVECTOR forward = XMVectorSubtract(target, position);
+	forward = XMVector3Normalize(forward);
+
+	XMVECTOR right = XMVector3Cross(up, forward);
+
+	right = XMVector3Normalize(right);
+
+	up = XMVector3Cross(forward, right);
+
+	XMFLOAT4 tempRight;
+	XMStoreFloat4(&tempRight, right);
+
+	XMFLOAT4 tempUp;
+	XMStoreFloat4(&tempUp, up);
+
+	XMFLOAT4 tempForward;
+	XMStoreFloat4(&tempForward, forward);
+
+	XMMATRIX newView = XMMatrixIdentity();
+	// XMMATRIX newView = XMMatrixLookAtLH(position, target, up);
+
+	newView.r[0] = XMVectorSet(tempRight.x, tempUp.x, tempForward.x, 0.0f);
+	newView.r[1] = XMVectorSet(tempRight.y, tempUp.y, tempForward.y, 0.0f);
+	newView.r[2] = XMVectorSet(tempRight.z, tempUp.z, tempForward.z, 0.0f);
+
+	float tx = -XMVectorGetX(XMVector3Dot(position, right));
+	float ty = -XMVectorGetX(XMVector3Dot(position, up));
+	float tz = -XMVectorGetX(XMVector3Dot(position, forward));
+
+	newView.r[3] = XMVectorSet(tx, ty, tz, 1.0f);
+
+	XMStoreFloat4x4(&view, newView);
+
+	XMMATRIX newProjection = XMLoadFloat4x4(&projection);
+	XMMATRIX newViewProjection = newView * newProjection;
+
+	// 用当前最新的worldViewProject矩阵来更新常量缓冲区
+	PassConstants passConstants;
+	XMStoreFloat4x4(&passConstants.viewProjection, XMMatrixTranspose(newViewProjection));
+	currentFrameResource->passConstantBuffer->CopyData(0, passConstants);
 }
 
 void demoApp::initImGUI() 
