@@ -239,6 +239,10 @@ XMFLOAT4 lookAt = {0.0f, 0.0f, 0.0f, 1.0f};
 float frameTime = 0.0f;
 bool windowActive = true;
 
+// 使用stb_image加载图片的时候，要将非32位色深的数据格式对齐到DirectX 12所需的DXGI_FORMAT_R8G8B8A8_UNORM格式
+// 如果是8位图片，从源数据中取1字节，然后用它填充目标数据的RGB部分，然后将A设置位255
+// 如果是24位图片，从源数据中读取RGG，然后将A设置位255
+// 并且每次外层循环(每行)，通过padding来对齐(因为DirectX 12要求纹理的行以256字节对齐，整个以512字节对齐(偶数行))
 void fill8bit(byte* dest, const byte* src, uint32_t width, uint32_t height, uint32_t padding) {
     for (uint32_t h = 0; h < width; h++) {
         for (uint32_t w = 0; w < height; w++) {
@@ -991,8 +995,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
             &textureRowNum,
             &textureRowSize,
             &requiredSize);
-        
-        byte* mappedTextureUploadBufferData = nullptr;
 
         uint32_t rowPitch = textureLayout.Footprint.RowPitch;
         uint32_t bufferSize = imageHeight * rowPitch;
@@ -1015,7 +1017,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
             fill24Bit(dest, src, imageWidth, imageHeight, padding);
         }
 
-        delete imageData;
+        stbi_image_free(imageData);
+
+        byte* mappedTextureUploadBufferData = nullptr;
 
         ThrowIfFailed(textureUploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedTextureUploadBufferData)));
 

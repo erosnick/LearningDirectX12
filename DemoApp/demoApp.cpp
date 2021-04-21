@@ -273,17 +273,17 @@ void demoApp::createConstantBufferViews() {
             // 偏移到常量缓冲区中第i个物体所对应的常量数据
             objectConstantBufferAddress += objectIndex * objectConstantBufferSize;
 
-            CD3DX12_CPU_DESCRIPTOR_HANDLE CBVDescriptorHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+            CD3DX12_CPU_DESCRIPTOR_HANDLE CBVCPUDescriptorHandle = CD3DX12_CPU_DESCRIPTOR_HANDLE(CBVDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
             uint32_t objectCBDescriptorHeapIndex = frameResourcesIndex * (objectCount + 1) + objectIndex;
 
-            CBVDescriptorHandle.Offset(objectCBDescriptorHeapIndex, CBVSRVUAVDescriptorSize);
+            CBVCPUDescriptorHandle.Offset(objectCBDescriptorHeapIndex, CBVSRVUAVDescriptorSize);
 
             D3D12_CONSTANT_BUFFER_VIEW_DESC objectConstantBufferViewDesc;
             objectConstantBufferViewDesc.BufferLocation = objectConstantBufferAddress;
             objectConstantBufferViewDesc.SizeInBytes = objectConstantBufferSize;
 
-            device->CreateConstantBufferView(&objectConstantBufferViewDesc, CBVDescriptorHandle);
+            device->CreateConstantBufferView(&objectConstantBufferViewDesc, CBVCPUDescriptorHandle);
         }
 
         auto& passConstantBuffer = frameResources[frameResourcesIndex]->passConstantBuffer;
