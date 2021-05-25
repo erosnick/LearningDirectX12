@@ -257,10 +257,10 @@ void LandAndWaves::onMouseMove(WPARAM btnState, int32_t x, int32_t y) {
         cameraPosition.y = y;
         cameraPosition.z = z;
 
-        // 原始公式
+        // 原始公式(右手坐标系)
         // r = sqrtf(x * x + y * y + z * z)
         // θ = arccos(z / r)
-        // Φ = arttan(y / x)
+        // Φ = arctan(y / x)
         // 右手坐标系中y和z轴对调了，所以下面
         // 的公式中y和z值也要进行对调
         radius = sqrtf(x * x + y * y + z * z);
